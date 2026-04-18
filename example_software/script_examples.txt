@@ -1,0 +1,1413 @@
+Here is a Garmin Fit file.Analyse the file and provide me some insights of this training activity. Analyse the heart rate and the other       related GPS data like speed, and elevation gain. Then estimate the power I was running at and give me some feedback about my fitness level.
+6:44 PM
+Ran 9 commands, viewed a file
+
+bash
+pip install fitparse --break-system-packages -q && python3 << 'EOF'
+from fitparse import FitFile
+import collections
+
+fitfile = FitFile('/mnt/user-data/uploads/2026-04-11-14-10-08.fit')
+
+# List all message types
+msg_types = collections.Counter()
+for record in fitfile.get_messages():
+    msg_types[record.name] += 1
+
+print("Message types:", dict(msg_types))
+EOF
+
+Output
+WARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7ecc57e8e270>: Failed to establish a new connection: [Errno -3] Temporary failure in name resolution')': /simple/fitparse/
+WARNING: Retrying (Retry(total=3, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7ecc583ea330>: Failed to establish a new connection: [Errno -3] Temporary failure in name resolution')': /simple/fitparse/
+WARNING: Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7ecc57f4b110>: Failed to establish a new connection: [Errno -3] Temporary failure in name resolution')': /simple/fitparse/
+WARNING: Retrying (Retry(total=1, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7ecc57f4b4d0>: Failed to establish a new connection: [Errno -3] Temporary failure in name resolution')': /simple/fitparse/
+WARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7ecc57f4b6e0>: Failed to establish a new connection: [Errno -3] Temporary failure in name resolution')': /simple/fitparse/
+ERROR: Could not find a version that satisfies the requirement fitparse (from versions: none)
+ERROR: No matching distribution found for fitparse
+
+bash
+python3 -c "import fitparse; print('fitparse available')" 2>/dev/null || python3 -c "import garmin_fit_sdk; print('garmin available')" 2>/dev/null || pip list 2>/dev/null | grep -i fit
+
+Output
+exit code 1
+
+bash
+python3 << 'EOF'
+# Parse FIT file manually - FIT is a binary format
+# Let's read the raw bytes and parse the protocol
+import struct
+
+filepath = '/mnt/user-data/uploads/2026-04-11-14-10-08.fit'
+
+with open(filepath, 'rb') as f:
+    data = f.read()
+
+print(f"File size: {len(data)} bytes")
+print(f"Header bytes (hex): {data[:14].hex()}")
+
+# FIT file header
+header_size = data[0]
+protocol_ver = data[1]
+profile_ver = struct.unpack('<H', data[2:4])[0]
+data_size = struct.unpack('<I', data[4:8])[0]
+data_type = data[8:12].decode('ascii')
+crc = struct.unpack('<H', data[12:14])[0]
+
+print(f"Header size: {header_size}")
+print(f"Protocol version: {protocol_ver}")
+print(f"Profile version: {profile_ver}")
+print(f"Data size: {data_size}")
+print(f"Data type: {data_type}")
+EOF
+
+Output
+File size: 71713 bytes
+Header bytes (hex): 0e109800111801002e4649540000
+Header size: 14
+Protocol version: 16
+Profile version: 152
+Data size: 71697
+Data type: .FIT
+
+bash
+python3 << 'EOF'
+# Let's write a minimal FIT parser to extract records
+import struct
+
+filepath = '/mnt/user-data/uploads/2026-04-11-14-10-08.fit'
+
+with open(filepath, 'rb') as f:
+    data = f.read()
+
+# FIT Global Message Numbers we care about
+GLOBAL_MESG_NUM = {
+    0: 'file_id',
+    18: 'session',
+    19: 'lap',
+    20: 'record',
+    21: 'event',
+    23: 'device_info',
+    34: 'activity',
+}
+
+# FIT base types
+BASE_TYPES = {
+    0x00: ('enum', 1, 'B'),
+    0x01: ('sint8', 1, 'b'),
+    0x02: ('uint8', 1, 'B'),
+    0x83: ('sint16', 2, '<h'),
+    0x84: ('uint16', 2, '<H'),
+    0x85: ('sint32', 4, '<i'),
+    0x86: ('uint32', 4, '<I'),
+    0x07: ('string', 1, None),
+    0x88: ('float32', 4, '<f'),
+    0x89: ('float64', 8, '<d'),
+    0x0A: ('uint8z', 1, 'B'),
+    0x8B: ('uint16z', 2, '<H'),
+    0x8C: ('uint32z', 4, '<I'),
+    0x0D: ('byte', 1, 'B'),
+    0x8E: ('sint64', 8, '<q'),
+    0x8F: ('uint64', 8, '<Q'),
+    0x90: ('uint64z', 8, '<Q'),
+}
+
+# Known field definitions for record messages (global mesg 20)
+RECORD_FIELDS = {
+    0: ('position_lat', 0x85, 1e-7 * (180/2**31)),   # semicircles to degrees
+    1: ('position_long', 0x85, 1e-7 * (180/2**31)),
+    2: ('altitude', 0x84, 0.2, -500),   # (val * 0.2) - 500 in meters... actually (val/5) - 500
+    3: ('heart_rate', 0x02, 1),
+    4: ('cadence', 0x02, 1),
+    5: ('distance', 0x86, 0.01),   # cm to m... actually 1/100 m = cm
+    6: ('speed', 0x84, 0.001),     # mm/s to m/s
+    7: ('power', 0x84, 1),
+    8: ('compressed_speed_distance', 0x0D, None),
+    9: ('grade', 0x83, 0.01),
+    10: ('resistance', 0x02, 1),
+    11: ('time_from_course', 0x85, 0.001),
+    12: ('cycle_length', 0x02, 0.01),
+    13: ('temperature', 0x01, 1),
+    17: ('cycle_length16', 0x84, 0.01),
+    18: ('speed_1s', 0x02, 0.25),
+    19: ('cycles', 0x02, 1),
+    20: ('total_cycles', 0x86, 1),
+    28: ('compressed_accumulated_power', 0x84, 1),
+    29: ('accumulated_power', 0x86, 1),
+    30: ('left_right_balance', 0x02, 1),
+    31: ('gps_accuracy', 0x02, 1),
+    32: ('vertical_speed', 0x83, 0.001),
+    33: ('calories', 0x84, 1),
+    39: ('vertical_oscillation', 0x84, 0.1),
+    40: ('stance_time_percent', 0x84, 0.01),
+    41: ('stance_time', 0x84, 0.1),
+    42: ('activity_type', 0x00, 1),
+    43: ('left_torque_effectiveness', 0x02, 0.5),
+    44: ('right_torque_effectiveness', 0x02, 0.5),
+    45: ('left_pedal_smoothness', 0x02, 0.5),
+    46: ('right_pedal_smoothness', 0x02, 0.5),
+    47: ('combined_pedal_smoothness', 0x02, 0.5),
+    53: ('time128', 0x02, 1/128),
+    54: ('stroke_type', 0x00, 1),
+    55: ('zone', 0x02, 1),
+    56: ('ball_speed', 0x84, 0.01),
+    57: ('cadence256', 0x84, 1/256),
+    58: ('fractional_cadence', 0x02, 0.5),
+    59: ('total_hemoglobin_conc', 0x84, 0.01),
+    60: ('total_hemoglobin_conc_min', 0x84, 0.01),
+    61: ('total_hemoglobin_conc_max', 0x84, 0.01),
+    62: ('saturated_hemoglobin_percent', 0x84, 0.1),
+    63: ('saturated_hemoglobin_percent_min', 0x84, 0.1),
+    64: ('saturated_hemoglobin_percent_max', 0x84, 0.1),
+    253: ('timestamp', 0x86, 1),   # seconds since 1989-12-31 00:00:00 UTC
+}
+
+SESSION_FIELDS = {
+    0: ('event', 0x00, 1),
+    1: ('event_type', 0x00, 1),
+    2: ('start_time', 0x86, 1),
+    5: ('sport', 0x00, 1),
+    6: ('sub_sport', 0x00, 1),
+    7: ('total_elapsed_time', 0x86, 0.001),
+    8: ('total_timer_time', 0x86, 0.001),
+    9: ('total_distance', 0x86, 0.01),
+    11: ('total_calories', 0x84, 1),
+    14: ('avg_speed', 0x84, 0.001),
+    15: ('max_speed', 0x84, 0.001),
+    16: ('avg_heart_rate', 0x02, 1),
+    17: ('max_heart_rate', 0x02, 1),
+    18: ('avg_cadence', 0x02, 1),
+    19: ('max_cadence', 0x02, 1),
+    20: ('avg_power', 0x84, 1),
+    21: ('max_power', 0x84, 1),
+    22: ('total_ascent', 0x84, 1),
+    23: ('total_descent', 0x84, 1),
+    24: ('total_training_effect', 0x02, 0.1),
+    25: ('first_lap_index', 0x84, 1),
+    26: ('num_laps', 0x84, 1),
+    27: ('event_group', 0x02, 1),
+    28: ('trigger', 0x00, 1),
+    29: ('nec_lat', 0x85, 1),
+    30: ('nec_long', 0x85, 1),
+    31: ('swc_lat', 0x85, 1),
+    32: ('swc_long', 0x85, 1),
+    34: ('normalized_power', 0x84, 1),
+    35: ('training_stress_score', 0x84, 0.1),
+    36: ('intensity_factor', 0x84, 0.001),
+    37: ('left_right_balance', 0x84, 1),
+    41: ('avg_stroke_count', 0x86, 0.01),
+    42: ('avg_stroke_distance', 0x84, 0.01),
+    43: ('swim_stroke', 0x00, 1),
+    44: ('pool_length', 0x84, 0.01),
+    45: ('threshold_power', 0x84, 1),
+    46: ('pool_length_unit', 0x00, 1),
+    47: ('num_active_lengths', 0x84, 1),
+    48: ('total_work', 0x86, 1),
+    49: ('avg_altitude', 0x84, 0.2, -500),
+    50: ('max_altitude', 0x84, 0.2, -500),
+    51: ('gps_accuracy', 0x02, 1),
+    52: ('avg_grade', 0x83, 0.01),
+    53: ('avg_pos_grade', 0x83, 0.01),
+    54: ('avg_neg_grade', 0x83, 0.01),
+    55: ('max_pos_grade', 0x83, 0.01),
+    56: ('max_neg_grade', 0x83, 0.01),
+    57: ('avg_temperature', 0x01, 1),
+    58: ('max_temperature', 0x01, 1),
+    59: ('total_moving_time', 0x86, 0.001),
+    60: ('avg_pos_vertical_speed', 0x84, 0.001),
+    61: ('avg_neg_vertical_speed', 0x84, 0.001),
+    62: ('max_pos_vertical_speed', 0x84, 0.001),
+    63: ('max_neg_vertical_speed', 0x84, 0.001),
+    64: ('min_heart_rate', 0x02, 1),
+    65: ('time_in_hr_zone', 0x86, 0.001),
+    68: ('avg_lap_time', 0x86, 0.001),
+    69: ('best_lap_index', 0x84, 1),
+    70: ('min_altitude', 0x84, 0.2, -500),
+    253: ('timestamp', 0x86, 1),
+    254: ('message_index', 0x84, 1),
+}
+
+def parse_fit(data):
+    offset = 14  # skip header
+    end = 14 + struct.unpack('<I', data[4:8])[0]
+
+    definitions = {}
+    records = []
+    sessions = []
+
+    FIT_EPOCH = 631065600  # seconds from Unix epoch to FIT epoch (Dec 31, 1989)
+
+    while offset < end - 2:
+        header_byte = data[offset]
+        offset += 1
+
+        is_definition = (header_byte & 0x40) != 0
+        local_msg_type = header_byte & 0x0F
+
+        if header_byte & 0x80:  # compressed timestamp
+            continue
+
+        if is_definition:
+            reserved = data[offset]; offset += 1
+            arch = data[offset]; offset += 1
+            global_mesg_num = struct.unpack('<H' if arch == 0 else '>H', data[offset:offset+2])[0]
+            offset += 2
+            num_fields = data[offset]; offset += 1
+
+            fields = []
+            for _ in range(num_fields):
+                field_def_num = data[offset]
+                field_size = data[offset+1]
+                base_type = data[offset+2]
+                offset += 3
+                fields.append((field_def_num, field_size, base_type))
+
+            # Handle developer fields if present (header bit 5)
+            if header_byte & 0x20:
+                num_dev_fields = data[offset]; offset += 1
+                for _ in range(num_dev_fields):
+                    offset += 3  # skip dev field defs
+
+            definitions[local_msg_type] = (global_mesg_num, fields, arch == 1)
+
+        else:  # data message
+            if local_msg_type not in definitions:
+                break
+
+            global_mesg_num, fields, big_endian = definitions[local_msg_type]
+
+            record = {'_mesg': global_mesg_num}
+
+            for field_def_num, field_size, base_type in fields:
+                raw = data[offset:offset+field_size]
+                offset += field_size
+
+                # Determine field lookup
+                if global_mesg_num == 20:  # record
+                    field_info = RECORD_FIELDS.get(field_def_num)
+                elif global_mesg_num == 18:  # session
+                    field_info = SESSION_FIELDS.get(field_def_num)
+                else:
+                    field_info = None
+
+                if field_info is None:
+                    continue
+
+                fname = field_info[0]
+                scale = field_info[2] if len(field_info) > 2 else 1
+                offset_val = field_info[3] if len(field_info) > 3 else 0
+
+                # Get base type info
+                bt = BASE_TYPES.get(base_type, None)
+                if bt is None:
+                    # try with just lower nibble
+                    continue
+
+                bname, bsize, bfmt = bt
+
+                if bfmt and bsize == field_size:
+                    endian = '>' if big_endian else '<'
+                    fmt = bfmt.replace('<', endian).replace('>', endian)
+                    try:
+                        val = struct.unpack(fmt, raw)[0]
+
+                        # Check for invalid values
+                        invalid = {1: 0xFF, 2: 0xFF, 4: 0xFFFFFFFF, 8: 0xFFFFFFFFFFFFFFFF}
+                        inv_signed = {1: 0x7F, 2: 0x7FFF, 4: 0x7FFFFFFF, 8: 0x7FFFFFFFFFFFFFFF}
+
+                        if val == invalid.get(bsize, None) or val == inv_signed.get(bsize, None):
+                            continue
+
+                        if fname == 'timestamp':
+                            record[fname] = val + FIT_EPOCH  # convert to unix
+                        elif fname in ('position_lat', 'position_long'):
+                            record[fname] = val * (180.0 / 2**31)
+                        elif fname == 'altitude':
+                            record[fname] = val * 0.2 - 500
+                        elif fname == 'avg_altitude':
+                            record[fname] = val * 0.2 - 500
+                        elif fname == 'max_altitude':
+                            record[fname] = val * 0.2 - 500
+                        elif fname == 'min_altitude':
+                            record[fname] = val * 0.2 - 500
+                        else:
+                            record[fname] = val * scale + offset_val
+                    except:
+                        continue
+
+            if global_mesg_num == 20 and len(record) > 2:
+                records.append(record)
+            elif global_mesg_num == 18 and len(record) > 2:
+                sessions.append(record)
+
+    return records, sessions
+
+records, sessions = parse_fit(data)
+print(f"Found {len(records)} data records")
+print(f"Found {len(sessions)} session records")
+
+if records:
+    print("\nSample record fields:", list(records[0].keys()))
+    print("Sample record:", records[0])
+    print("Last record:", records[-1])
+
+if sessions:
+    print("\nSession data:", sessions[0])
+EOF
+
+Output
+Found 3078 data records
+Found 1 session records
+
+Sample record fields: ['_mesg', 'timestamp', 'position_lat', 'position_long', 'distance', 'altitude', 'speed', 'heart_rate']
+Sample record: {'_mesg': 20, 'timestamp': 1775909408, 'position_lat': 47.0777284540236, 'position_long': 15.40782236494124, 'distance': 1.82, 'altitude': 313.80000000000007, 'speed': 1.847, 'heart_rate': 83}
+Last record: {'_mesg': 20, 'timestamp': 1775915542, 'position_lat': 47.035298086702824, 'position_long': 15.369799872860312, 'distance': 22350.39, 'altitude': 477.4000000000001, 'speed': 2.785, 'heart_rate': 125, 'temperature': 12}
+
+Session data: {'_mesg': 18, 'timestamp': 1776010474, 'start_time': 1144843808, 'total_elapsed_time': 7982.6, 'total_timer_time': 7982.6, 'total_distance': 32217.59, 'nec_lat': 561947502, 'nec_long': 183822707, 'swc_lat': 561081713, 'swc_long': 183312707, 'message_index': 0, 'total_calories': 809, 'avg_speed': 4.0360000000000005, 'max_speed': 11.811, 'avg_power': 65535, 'max_power': 65535, 'total_ascent': 589, 'total_descent': 600, 'first_lap_index': 0, 'num_laps': 1, 'normalized_power': 65535, 'training_stress_score': 6553.5, 'intensity_factor': 65.535, 'left_right_balance': 65535, 'threshold_power': 65535, 'event': 9, 'event_type': 1, 'sport': 2, 'sub_sport': 0, 'avg_heart_rate': 119, 'max_heart_rate': 163, 'trigger': 0}
+
+bash
+python3 << 'EOF'
+import struct
+from datetime import datetime, timezone
+
+filepath = '/mnt/user-data/uploads/2026-04-11-14-10-08.fit'
+with open(filepath, 'rb') as f:
+    data = f.read()
+
+# Re-use the parsing code from above (inline for brevity)
+BASE_TYPES = {
+    0x00: ('enum', 1, 'B'), 0x01: ('sint8', 1, 'b'), 0x02: ('uint8', 1, 'B'),
+    0x83: ('sint16', 2, '<h'), 0x84: ('uint16', 2, '<H'), 0x85: ('sint32', 4, '<i'),
+    0x86: ('uint32', 4, '<I'), 0x07: ('string', 1, None), 0x88: ('float32', 4, '<f'),
+    0x89: ('float64', 8, '<d'), 0x0A: ('uint8z', 1, 'B'), 0x8B: ('uint16z', 2, '<H'),
+    0x8C: ('uint32z', 4, '<I'), 0x0D: ('byte', 1, 'B'), 0x8E: ('sint64', 8, '<q'),
+    0x8F: ('uint64', 8, '<Q'), 0x90: ('uint64z', 8, '<Q'),
+}
+RECORD_FIELDS = {
+    0: ('position_lat', 0x85, 1), 1: ('position_long', 0x85, 1),
+    2: ('altitude', 0x84, 1), 3: ('heart_rate', 0x02, 1),
+    4: ('cadence', 0x02, 1), 5: ('distance', 0x86, 0.01),
+    6: ('speed', 0x84, 0.001), 7: ('power', 0x84, 1),
+    13: ('temperature', 0x01, 1), 253: ('timestamp', 0x86, 1),
+}
+SESSION_FIELDS = {
+    7: ('total_elapsed_time', 0x86, 0.001), 8: ('total_timer_time', 0x86, 0.001),
+    9: ('total_distance', 0x86, 0.01), 11: ('total_calories', 0x84, 1),
+    14: ('avg_speed', 0x84, 0.001), 15: ('max_speed', 0x84, 0.001),
+    16: ('avg_heart_rate', 0x02, 1), 17: ('max_heart_rate', 0x02, 1),
+    18: ('avg_cadence', 0x02, 1), 19: ('max_cadence', 0x02, 1),
+    22: ('total_ascent', 0x84, 1), 23: ('total_descent', 0x84, 1),
+    5: ('sport', 0x00, 1), 57: ('avg_temperature', 0x01, 1),
+    58: ('max_temperature', 0x01, 1), 64: ('min_heart_rate', 0x02, 1),
+    253: ('timestamp', 0x86, 1), 2: ('start_time', 0x86, 1),
+}
+
+FIT_EPOCH = 631065600
+
+def parse_fit(data):
+    offset = 14
+    end = 14 + struct.unpack('<I', data[4:8])[0]
+    definitions = {}
+    records = []
+    sessions = []
+    while offset < end - 2:
+        header_byte = data[offset]; offset += 1
+        if header_byte & 0x80: continue
+        is_definition = (header_byte & 0x40) != 0
+        local_msg_type = header_byte & 0x0F
+        if is_definition:
+            reserved = data[offset]; offset += 1
+            arch = data[offset]; offset += 1
+            global_mesg_num = struct.unpack('<H' if arch == 0 else '>H', data[offset:offset+2])[0]; offset += 2
+            num_fields = data[offset]; offset += 1
+            fields = []
+            for _ in range(num_fields):
+                field_def_num = data[offset]; field_size = data[offset+1]; base_type = data[offset+2]
+                offset += 3
+                fields.append((field_def_num, field_size, base_type))
+            if header_byte & 0x20:
+                num_dev_fields = data[offset]; offset += 1
+                for _ in range(num_dev_fields): offset += 3
+            definitions[local_msg_type] = (global_mesg_num, fields, arch == 1)
+        else:
+            if local_msg_type not in definitions: break
+            global_mesg_num, fields, big_endian = definitions[local_msg_type]
+            record = {'_mesg': global_mesg_num}
+            for field_def_num, field_size, base_type in fields:
+                raw = data[offset:offset+field_size]; offset += field_size
+                if global_mesg_num == 20: field_info = RECORD_FIELDS.get(field_def_num)
+                elif global_mesg_num == 18: field_info = SESSION_FIELDS.get(field_def_num)
+                else: field_info = None
+                if field_info is None: continue
+                fname = field_info[0]; scale = field_info[2] if len(field_info) > 2 else 1
+                bt = BASE_TYPES.get(base_type)
+                if bt is None: continue
+                bname, bsize, bfmt = bt
+                if bfmt and bsize == field_size:
+                    endian = '>' if big_endian else '<'
+                    fmt = bfmt.replace('<', endian).replace('>', endian)
+                    try:
+                        val = struct.unpack(fmt, raw)[0]
+                        inv = {1: 0xFF, 2: 0xFFFF, 4: 0xFFFFFFFF}
+                        inv_s = {1: 0x7F, 2: 0x7FFF, 4: 0x7FFFFFFF}
+                        if val == inv.get(bsize) or val == inv_s.get(bsize): continue
+                        if fname == 'timestamp': record[fname] = val + FIT_EPOCH
+                        elif fname in ('position_lat', 'position_long'): record[fname] = val * (180.0 / 2**31)
+                        elif fname == 'altitude': record[fname] = val * 0.2 - 500
+                        elif fname == 'start_time': record[fname] = val + FIT_EPOCH
+                        else: record[fname] = val * scale
+                    except: continue
+            if global_mesg_num == 20 and len(record) > 2: records.append(record)
+            elif global_mesg_num == 18 and len(record) > 2: sessions.append(record)
+    return records, sessions
+
+records, sessions = parse_fit(data)
+
+# ---- Analysis ----
+import statistics
+
+# Basic timing
+timestamps = [r['timestamp'] for r in records if 'timestamp' in r]
+start_ts = min(timestamps)
+end_ts = max(timestamps)
+duration_s = end_ts - start_ts
+start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+
+print(f"=== ACTIVITY SUMMARY ===")
+print(f"Date: {start_dt.strftime('%Y-%m-%d %H:%M UTC')}")
+print(f"Duration: {duration_s//3600:.0f}h {(duration_s%3600)//60:.0f}m {duration_s%60:.0f}s")
+
+# Distance
+distances = [r['distance'] for r in records if 'distance' in r]
+total_dist = max(distances) if distances else 0
+print(f"Total Distance: {total_dist/1000:.2f} km")
+
+# Session data
+if sessions:
+    s = sessions[0]
+    print(f"\n=== SESSION FIELDS ===")
+    for k, v in s.items():
+        if k != '_mesg': print(f"  {k}: {v}")
+
+# Heart rate
+hrs = [r['heart_rate'] for r in records if 'heart_rate' in r and r['heart_rate'] > 30]
+print(f"\n=== HEART RATE ===")
+print(f"Min HR: {min(hrs)} bpm")
+print(f"Max HR: {max(hrs)} bpm")
+print(f"Avg HR: {statistics.mean(hrs):.1f} bpm")
+print(f"Median HR: {statistics.median(hrs):.1f} bpm")
+
+# Speed
+speeds = [r['speed'] for r in records if 'speed' in r and r['speed'] > 0]
+print(f"\n=== SPEED ===")
+avg_speed_ms = statistics.mean(speeds)
+max_speed_ms = max(speeds)
+print(f"Avg Speed: {avg_speed_ms:.3f} m/s = {avg_speed_ms*3.6:.2f} km/h")
+print(f"Max Speed: {max_speed_ms:.3f} m/s = {max_speed_ms*3.6:.2f} km/h")
+# Running pace
+avg_pace_min_per_km = (1000 / avg_speed_ms) / 60
+print(f"Avg Pace: {int(avg_pace_min_per_km)}:{int((avg_pace_min_per_km % 1)*60):02d} min/km")
+
+# Altitude
+alts = [r['altitude'] for r in records if 'altitude' in r]
+print(f"\n=== ELEVATION ===")
+print(f"Min Alt: {min(alts):.1f} m")
+print(f"Max Alt: {max(alts):.1f} m")
+print(f"Alt Range: {max(alts)-min(alts):.1f} m")
+
+# Compute elevation gain/loss from records
+gain = 0
+loss = 0
+for i in range(1, len(alts)):
+    diff = alts[i] - alts[i-1]
+    if diff > 0: gain += diff
+    else: loss += abs(diff)
+print(f"Total Ascent (computed): {gain:.0f} m")
+print(f"Total Descent (computed): {loss:.0f} m")
+
+# Temperature
+temps = [r['temperature'] for r in records if 'temperature' in r]
+if temps:
+    print(f"\n=== TEMPERATURE ===")
+    print(f"Avg Temp: {statistics.mean(temps):.1f}°C")
+    print(f"Min Temp: {min(temps):.1f}°C  Max Temp: {max(temps):.1f}°C")
+EOF
+
+Output
+=== ACTIVITY SUMMARY ===
+Date: 2026-04-11 12:10 UTC
+Duration: 1h 42m 14s
+Total Distance: 22.35 km
+
+=== SESSION FIELDS ===
+  timestamp: 1776010474
+  start_time: 1775909408
+  total_elapsed_time: 7982.6
+  total_timer_time: 7982.6
+  total_distance: 32217.59
+  total_calories: 809
+  avg_speed: 4.0360000000000005
+  max_speed: 11.811
+  total_ascent: 589
+  total_descent: 600
+  sport: 2
+  avg_heart_rate: 119
+  max_heart_rate: 163
+
+=== HEART RATE ===
+Min HR: 57 bpm
+Max HR: 163 bpm
+Avg HR: 120.6 bpm
+Median HR: 128.0 bpm
+
+=== SPEED ===
+Avg Speed: 3.792 m/s = 13.65 km/h
+Max Speed: 10.985 m/s = 39.55 km/h
+Avg Pace: 4:23 min/km
+
+=== ELEVATION ===
+Min Alt: 313.4 m
+Max Alt: 678.8 m
+Alt Range: 365.4 m
+Total Ascent (computed): 553 m
+Total Descent (computed): 389 m
+
+=== TEMPERATURE ===
+Avg Temp: 12.8°C
+Min Temp: 10.0°C  Max Temp: 21.0°C
+
+bash
+python3 << 'EOF'
+import struct, statistics
+from datetime import datetime, timezone
+
+filepath = '/mnt/user-data/uploads/2026-04-11-14-10-08.fit'
+with open(filepath, 'rb') as f:
+    data = f.read()
+
+BASE_TYPES = {
+    0x00: ('enum', 1, 'B'), 0x01: ('sint8', 1, 'b'), 0x02: ('uint8', 1, 'B'),
+    0x83: ('sint16', 2, '<h'), 0x84: ('uint16', 2, '<H'), 0x85: ('sint32', 4, '<i'),
+    0x86: ('uint32', 4, '<I'), 0x07: ('string', 1, None), 0x0D: ('byte', 1, 'B'),
+}
+RECORD_FIELDS = {
+    0: ('position_lat', 0x85), 1: ('position_long', 0x85),
+    2: ('altitude', 0x84), 3: ('heart_rate', 0x02),
+    4: ('cadence', 0x02), 5: ('distance', 0x86),
+    6: ('speed', 0x84), 7: ('power', 0x84),
+    13: ('temperature', 0x01), 253: ('timestamp', 0x86),
+}
+
+FIT_EPOCH = 631065600
+
+def parse_fit(data):
+    offset = 14
+    end = 14 + struct.unpack('<I', data[4:8])[0]
+    definitions = {}
+    records = []
+    while offset < end - 2:
+        header_byte = data[offset]; offset += 1
+        if header_byte & 0x80: continue
+        is_definition = (header_byte & 0x40) != 0
+        local_msg_type = header_byte & 0x0F
+        if is_definition:
+            reserved = data[offset]; offset += 1
+            arch = data[offset]; offset += 1
+            global_mesg_num = struct.unpack('<H' if arch == 0 else '>H', data[offset:offset+2])[0]; offset += 2
+            num_fields = data[offset]; offset += 1
+            fields = []
+            for _ in range(num_fields):
+                field_def_num = data[offset]; field_size = data[offset+1]; base_type = data[offset+2]
+                offset += 3; fields.append((field_def_num, field_size, base_type))
+            if header_byte & 0x20:
+                num_dev_fields = data[offset]; offset += 1
+                for _ in range(num_dev_fields): offset += 3
+            definitions[local_msg_type] = (global_mesg_num, fields, arch == 1)
+        else:
+            if local_msg_type not in definitions: break
+            global_mesg_num, fields, big_endian = definitions[local_msg_type]
+            record = {'_mesg': global_mesg_num}
+            for field_def_num, field_size, base_type in fields:
+                raw = data[offset:offset+field_size]; offset += field_size
+                if global_mesg_num != 20: continue
+                field_info = RECORD_FIELDS.get(field_def_num)
+                if field_info is None: continue
+                fname = field_info[0]
+                bt = BASE_TYPES.get(base_type)
+                if bt is None: continue
+                bname, bsize, bfmt = bt
+                if bfmt and bsize == field_size:
+                    endian = '>' if big_endian else '<'
+                    fmt = bfmt.replace('<', endian).replace('>', endian)
+                    try:
+                        val = struct.unpack(fmt, raw)[0]
+                        inv = {1: 0xFF, 2: 0xFFFF, 4: 0xFFFFFFFF}
+                        inv_s = {1: 0x7F, 2: 0x7FFF, 4: 0x7FFFFFFF}
+                        if val == inv.get(bsize) or val == inv_s.get(bsize): continue
+                        if fname == 'timestamp': record[fname] = val + FIT_EPOCH
+                        elif fname in ('position_lat', 'position_long'): record[fname] = val * (180.0 / 2**31)
+                        elif fname == 'altitude': record[fname] = val * 0.2 - 500
+                        elif fname == 'distance': record[fname] = val * 0.01
+                        elif fname == 'speed': record[fname] = val * 0.001
+                        else: record[fname] = val
+                    except: continue
+            if global_mesg_num == 20 and len(record) > 2: records.append(record)
+    return records
+
+records = parse_fit(data)
+
+# Build time-series data for visualization
+timestamps = [r.get('timestamp', 0) for r in records]
+t0 = min(timestamps)
+times_min = [(t - t0)/60 for t in timestamps]
+
+hrs = [r.get('heart_rate', None) for r in records]
+speeds_kmh = [r.get('speed', 0)*3.6 if r.get('speed') else None for r in records]
+alts = [r.get('altitude', None) for r in records]
+dists = [r.get('distance', None) for r in records]
+
+# HR zones (assuming max HR ~175 from the 163 peak, or use 163 as effective max)
+max_hr = 163
+def hr_zone(hr):
+    if hr < 0.6 * max_hr: return 1
+    elif hr < 0.7 * max_hr: return 2
+    elif hr < 0.8 * max_hr: return 3
+    elif hr < 0.9 * max_hr: return 4
+    else: return 5
+
+hr_vals = [r['heart_rate'] for r in records if 'heart_rate' in r]
+zones = [hr_zone(h) for h in hr_vals]
+zone_counts = {1:0, 2:0, 3:0, 4:0, 5:0}
+for z in zones: zone_counts[z] += 1
+total_pts = len(zones)
+print("HR Zone distribution (% of time):")
+for z, cnt in zone_counts.items():
+    pct = cnt/total_pts*100
+    print(f"  Zone {z}: {pct:.1f}%")
+
+# Estimate running power using Minetti formula
+# P = v * (155.4*i^5 - 30.4*i^4 - 43.3*i^3 + 46.3*i^2 + 19.5*i + 3.6)
+# where i = slope (fraction), v = speed m/s
+# Body weight assumed ~70 kg (we'll note this)
+mass = 70  # kg, user can adjust
+
+powers = []
+for i in range(1, len(records)):
+    r = records[i]
+    r_prev = records[i-1]
+    if 'speed' not in r or 'altitude' not in r or 'altitude' not in r_prev: continue
+    v = r['speed']
+    if v < 0.5: continue
+    dt = r.get('timestamp', 0) - r_prev.get('timestamp', 0)
+    if dt <= 0 or dt > 10: continue
+    dalt = r['altitude'] - r_prev['altitude']
+    ddist = r.get('distance', 0) - r_prev.get('distance', 0)
+    if ddist <= 0: continue
+    slope = dalt / ddist
+    slope = max(-0.45, min(0.45, slope))  # clamp
+    i_s = slope
+    # Minetti metabolic cost (J/kg/m)
+    Cmet = 155.4*i_s**5 - 30.4*i_s**4 - 43.3*i_s**3 + 46.3*i_s**2 + 19.5*i_s + 3.6
+    # Mechanical efficiency ~25% for running
+    P = Cmet * v * mass * 0.25
+    if P > 0: powers.append(P)
+
+if powers:
+    avg_power = statistics.mean(powers)
+    # Normalized power (mean of 30s rolling avg^4)^0.25
+    print(f"\nEstimated Running Power:")
+    print(f"  Avg: {avg_power:.0f} W")
+    print(f"  W/kg: {avg_power/mass:.2f}")
+
+# Pace per km breakdowns
+valid_records = [(r['timestamp'], r['speed'], r.get('heart_rate'))
+                  for r in records
+                  if 'speed' in r and 'heart_rate' in r and r['speed'] > 0.5]
+
+# Compute splits by 5 min intervals
+print("\nPace & HR by time segment (5-min blocks):")
+bucket_size = 300  # seconds
+current_bucket = 0
+bucket_speeds = []
+bucket_hrs = []
+all_buckets = []
+
+t0 = records[0]['timestamp']
+for r in records:
+    if 'speed' not in r or 'heart_rate' not in r: continue
+    t_rel = r['timestamp'] - t0
+    bucket_idx = int(t_rel // bucket_size)
+    while bucket_idx > current_bucket:
+        if bucket_speeds:
+            avg_s = statistics.mean(bucket_speeds)
+            avg_h = statistics.mean(bucket_hrs)
+            pace = (1000/avg_s)/60 if avg_s > 0 else 99
+            all_buckets.append((current_bucket*5, avg_s*3.6, avg_h, pace))
+        bucket_speeds = []
+        bucket_hrs = []
+        current_bucket += 1
+    bucket_speeds.append(r['speed'])
+    bucket_hrs.append(r['heart_rate'])
+
+# Print all segments
+for t_min, spd_kmh, avg_hr, pace in all_buckets:
+    print(f"  {t_min:3d}-{t_min+5:3d} min: pace {int(pace)}:{int((pace%1)*60):02d}/km, {spd_kmh:.1f} km/h, HR {avg_hr:.0f} bpm")
+EOF
+
+Output
+HR Zone distribution (% of time):
+  Zone 1: 25.6%
+  Zone 2: 10.9%
+  Zone 3: 16.2%
+  Zone 4: 33.3%
+  Zone 5: 13.9%
+
+Estimated Running Power:
+  Avg: 278 W
+  W/kg: 3.97
+
+Pace & HR by time segment (5-min blocks):
+    0-  5 min: pace 4:09/km, 14.4 km/h, HR 98 bpm
+    5- 10 min: pace 2:28/km, 24.2 km/h, HR 118 bpm
+   10- 15 min: pace 2:53/km, 20.7 km/h, HR 126 bpm
+   15- 20 min: pace 2:51/km, 21.0 km/h, HR 135 bpm
+   20- 25 min: pace 9:20/km, 6.4 km/h, HR 134 bpm
+   25- 30 min: pace 7:09/km, 8.4 km/h, HR 130 bpm
+   30- 35 min: pace 10:23/km, 5.8 km/h, HR 144 bpm
+   35- 40 min: pace 5:32/km, 10.8 km/h, HR 132 bpm
+   40- 45 min: pace 7:46/km, 7.7 km/h, HR 139 bpm
+   45- 50 min: pace 11:43/km, 5.1 km/h, HR 141 bpm
+   50- 55 min: pace 10:21/km, 5.8 km/h, HR 146 bpm
+   55- 60 min: pace 7:48/km, 7.7 km/h, HR 145 bpm
+   60- 65 min: pace 3:15/km, 18.4 km/h, HR 104 bpm
+   65- 70 min: pace 2:06/km, 28.5 km/h, HR 79 bpm
+   70- 75 min: pace 3:40/km, 16.4 km/h, HR 94 bpm
+   75- 80 min: pace 3:50/km, 15.7 km/h, HR 91 bpm
+   80- 85 min: pace 11:11/km, 5.4 km/h, HR 139 bpm
+   85- 90 min: pace 6:36/km, 9.1 km/h, HR 124 bpm
+   90- 95 min: pace 6:06/km, 9.8 km/h, HR 138 bpm
+   95-100 min: pace 4:03/km, 14.8 km/h, HR 117 bpm
+
+bash
+python3 << 'EOF'
+# Check what kind of activity this is - speed data seems unusual for running (28 km/h??)
+# Let's check max speed vs session max
+# Session max speed: 11.811 m/s = 42.5 km/h - seems like cycling!
+# Sport field = 2 in FIT = cycling
+
+# FIT sport codes:
+# 0 = generic
+# 1 = running
+# 2 = cycling
+# 3 = transition
+# 4 = fitness_equipment
+# 5 = swimming
+
+print("FIT Sport code 2 = CYCLING")
+print()
+# Let's recalculate with cycling in mind
+# The session total_distance was 32217.59 m = 32.2 km
+# But records only go to 22.35 km - maybe it's a partial parse
+# Max speed 11.811 m/s = 42.5 km/h - definitely cycling!
+# Avg speed 4.036 m/s = 14.5 km/h
+
+# Let me look at the records more carefully
+import struct
+
+filepath = '/mnt/user-data/uploads/2026-04-11-14-10-08.fit'
+with open(filepath, 'rb') as f:
+    data = f.read()
+
+BASE_TYPES = {
+    0x00: ('enum', 1, 'B'), 0x01: ('sint8', 1, 'b'), 0x02: ('uint8', 1, 'B'),
+    0x83: ('sint16', 2, '<h'), 0x84: ('uint16', 2, '<H'), 0x85: ('sint32', 4, '<i'),
+    0x86: ('uint32', 4, '<I'), 0x07: ('string', 1, None), 0x0D: ('byte', 1, 'B'),
+}
+RECORD_FIELDS = {
+    0: ('position_lat', 0x85), 1: ('position_long', 0x85),
+    2: ('altitude', 0x84), 3: ('heart_rate', 0x02),
+    4: ('cadence', 0x02), 5: ('distance', 0x86),
+    6: ('speed', 0x84), 7: ('power', 0x84),
+    13: ('temperature', 0x01), 253: ('timestamp', 0x86),
+}
+FIT_EPOCH = 631065600
+
+def parse_fit_records(data):
+    offset = 14
+    end = 14 + struct.unpack('<I', data[4:8])[0]
+    definitions = {}
+    records = []
+    while offset < end - 2:
+        header_byte = data[offset]; offset += 1
+        if header_byte & 0x80: continue
+        is_definition = (header_byte & 0x40) != 0
+        local_msg_type = header_byte & 0x0F
+        if is_definition:
+            reserved = data[offset]; offset += 1
+            arch = data[offset]; offset += 1
+            global_mesg_num = struct.unpack('<H' if arch == 0 else '>H', data[offset:offset+2])[0]; offset += 2
+            num_fields = data[offset]; offset += 1
+            fields = []
+            for _ in range(num_fields):
+                field_def_num = data[offset]; field_size = data[offset+1]; base_type = data[offset+2]
+                offset += 3; fields.append((field_def_num, field_size, base_type))
+            if header_byte & 0x20:
+                num_dev_fields = data[offset]; offset += 1
+                for _ in range(num_dev_fields): offset += 3
+            definitions[local_msg_type] = (global_mesg_num, fields, arch == 1)
+        else:
+            if local_msg_type not in definitions: break
+            global_mesg_num, fields, big_endian = definitions[local_msg_type]
+            record = {'_mesg': global_mesg_num}
+            for field_def_num, field_size, base_type in fields:
+                raw = data[offset:offset+field_size]; offset += field_size
+                if global_mesg_num != 20: continue
+                field_info = RECORD_FIELDS.get(field_def_num)
+                if field_info is None: continue
+                fname = field_info[0]
+                bt = BASE_TYPES.get(base_type)
+                if bt is None: continue
+                bname, bsize, bfmt = bt
+                if bfmt and bsize == field_size:
+                    endian = '>' if big_endian else '<'
+                    fmt = bfmt.replace('<', endian).replace('>', endian)
+                    try:
+                        val = struct.unpack(fmt, raw)[0]
+                        inv = {1: 0xFF, 2: 0xFFFF, 4: 0xFFFFFFFF}
+                        inv_s = {1: 0x7F, 2: 0x7FFF, 4: 0x7FFFFFFF}
+                        if val == inv.get(bsize) or val == inv_s.get(bsize): continue
+                        if fname == 'timestamp': record[fname] = val + FIT_EPOCH
+                        elif fname in ('position_lat', 'position_long'): record[fname] = val * (180.0 / 2**31)
+                        elif fname == 'altitude': record[fname] = val * 0.2 - 500
+                        elif fname == 'distance': record[fname] = val * 0.01
+                        elif fname == 'speed': record[fname] = val * 0.001
+                        else: record[fname] = val
+                    except: continue
+            if global_mesg_num == 20 and len(record) > 2: records.append(record)
+    return records
+
+records = parse_fit_records(data)
+
+# Check speed stats
+speeds = [r['speed'] for r in records if 'speed' in r and r['speed'] > 0]
+import statistics
+print(f"Speed stats: min={min(speeds)*3.6:.1f}, max={max(speeds)*3.6:.1f}, median={statistics.median(speeds)*3.6:.1f} km/h")
+
+# Distance progress
+dists = [r['distance'] for r in records if 'distance' in r]
+print(f"Distance: min={min(dists):.0f}m, max={max(dists):.0f}m")
+
+# The session says 32.2 km but records stop at 22.3 km
+# This might indicate a GPS dropout or the parser stopped early
+
+# Let's count total data points
+print(f"Total records: {len(records)}")
+print(f"Records with speed: {sum(1 for r in records if 'speed' in r)}")
+print(f"Records with HR: {sum(1 for r in records if 'heart_rate' in r)}")
+print(f"Records with altitude: {sum(1 for r in records if 'altitude' in r)}")
+print(f"Records with cadence: {sum(1 for r in records if 'cadence' in r)}")
+
+# Print some cadence data
+cads = [r['cadence'] for r in records if 'cadence' in r]
+if cads:
+    print(f"\nCadence (rpm): min={min(cads)}, max={max(cads)}, avg={statistics.mean(cads):.0f}")
+    # Note: for cycling, cadence is direct rpm
+    # For running, Garmin usually doubles it to give steps/min
+    print("Cadence for cycling = rpm")
+
+# Print first 5 records
+print("\nFirst 5 records:")
+for r in records[:5]:
+    print(r)
+print("\nLast 5 records:")
+for r in records[-5:]:
+    print(r)
+EOF
+
+Output
+FIT Sport code 2 = CYCLING
+
+Speed stats: min=1.9, max=39.5, median=10.0 km/h
+Distance: min=2m, max=22350m
+Total records: 3078
+Records with speed: 3078
+Records with HR: 3041
+Records with altitude: 3078
+Records with cadence: 0
+
+First 5 records:
+{'_mesg': 20, 'timestamp': 1775909408, 'position_lat': 47.0777284540236, 'position_long': 15.40782236494124, 'distance': 1.82, 'altitude': 313.80000000000007, 'speed': 1.847, 'heart_rate': 83}
+{'_mesg': 20, 'timestamp': 1775909409, 'position_lat': 47.07771395333111, 'position_long': 15.407841308042407, 'distance': 3.98, 'altitude': 313.80000000000007, 'speed': 1.905, 'heart_rate': 83}
+{'_mesg': 20, 'timestamp': 1775909411, 'position_lat': 47.07771177403629, 'position_long': 15.407835356891155, 'distance': 4.0200000000000005, 'altitude': 313.80000000000007, 'speed': 1.301, 'heart_rate': 85, 'temperature': 21}
+{'_mesg': 20, 'timestamp': 1775909412, 'position_lat': 47.07772543653846, 'position_long': 15.407796883955598, 'distance': 4.0200000000000005, 'altitude': 313.4000000000001, 'speed': 0.869, 'heart_rate': 87, 'temperature': 21}
+{'_mesg': 20, 'timestamp': 1775909414, 'position_lat': 47.07772510126233, 'position_long': 15.407778695225716, 'distance': 5.07, 'altitude': 313.4000000000001, 'speed': 1.342, 'heart_rate': 89, 'temperature': 21}
+
+Last 5 records:
+{'_mesg': 20, 'timestamp': 1775915533, 'position_lat': 47.035513585433364, 'position_long': 15.369622595608234, 'distance': 22322.8, 'altitude': 476.4000000000001, 'speed': 3.028, 'heart_rate': 125, 'temperature': 12}
+{'_mesg': 20, 'timestamp': 1775915534, 'position_lat': 47.0354856736958, 'position_long': 15.369636844843626, 'distance': 22326.09, 'altitude': 477.0, 'speed': 3.208, 'heart_rate': 125, 'temperature': 12}
+{'_mesg': 20, 'timestamp': 1775915535, 'position_lat': 47.035460444167256, 'position_long': 15.369654195383191, 'distance': 22329.18, 'altitude': 477.4000000000001, 'speed': 3.061, 'heart_rate': 125, 'temperature': 12}
+{'_mesg': 20, 'timestamp': 1775915536, 'position_lat': 47.035436891019344, 'position_long': 15.369673976674676, 'distance': 22332.2, 'altitude': 477.4000000000001, 'speed': 3.0, 'heart_rate': 125, 'temperature': 12}
+{'_mesg': 20, 'timestamp': 1775915542, 'position_lat': 47.035298086702824, 'position_long': 15.369799872860312, 'distance': 22350.39, 'altitude': 477.4000000000001, 'speed': 2.785, 'heart_rate': 125, 'temperature': 12}
+
+bash
+python3 << 'EOF'
+# The data stops at 22.35km but session says 32.2km
+# Records stop at timestamp 1775915542 but started at 1775909408 = 6134s ~ 1h42m
+# However the session says total_elapsed_time = 7982.6s ~ 2h13m
+# So there's definitely a GPS gap. Let me check timestamp gaps
+
+import struct, statistics
+
+filepath = '/mnt/user-data/uploads/2026-04-11-14-10-08.fit'
+with open(filepath, 'rb') as f:
+    data = f.read()
+
+BASE_TYPES = {
+    0x00: ('enum', 1, 'B'), 0x01: ('sint8', 1, 'b'), 0x02: ('uint8', 1, 'B'),
+    0x83: ('sint16', 2, '<h'), 0x84: ('uint16', 2, '<H'), 0x85: ('sint32', 4, '<i'),
+    0x86: ('uint32', 4, '<I'), 0x07: ('string', 1, None), 0x0D: ('byte', 1, 'B'),
+}
+RECORD_FIELDS = {
+    0: ('position_lat', 0x85), 1: ('position_long', 0x85),
+    2: ('altitude', 0x84), 3: ('heart_rate', 0x02),
+    4: ('cadence', 0x02), 5: ('distance', 0x86),
+    6: ('speed', 0x84), 7: ('power', 0x84),
+    13: ('temperature', 0x01), 253: ('timestamp', 0x86),
+}
+FIT_EPOCH = 631065600
+
+def parse_fit_records(data):
+    offset = 14
+    end = 14 + struct.unpack('<I', data[4:8])[0]
+    definitions = {}
+    records = []
+    while offset < end - 2:
+        header_byte = data[offset]; offset += 1
+        if header_byte & 0x80: continue
+        is_definition = (header_byte & 0x40) != 0
+        local_msg_type = header_byte & 0x0F
+        if is_definition:
+            reserved = data[offset]; offset += 1
+            arch = data[offset]; offset += 1
+            global_mesg_num = struct.unpack('<H' if arch == 0 else '>H', data[offset:offset+2])[0]; offset += 2
+            num_fields = data[offset]; offset += 1
+            fields = []
+            for _ in range(num_fields):
+                field_def_num = data[offset]; field_size = data[offset+1]; base_type = data[offset+2]
+                offset += 3; fields.append((field_def_num, field_size, base_type))
+            if header_byte & 0x20:
+                num_dev_fields = data[offset]; offset += 1
+                for _ in range(num_dev_fields): offset += 3
+            definitions[local_msg_type] = (global_mesg_num, fields, arch == 1)
+        else:
+            if local_msg_type not in definitions: break
+            global_mesg_num, fields, big_endian = definitions[local_msg_type]
+            record = {'_mesg': global_mesg_num}
+            for field_def_num, field_size, base_type in fields:
+                raw = data[offset:offset+field_size]; offset += field_size
+                if global_mesg_num != 20: continue
+                field_info = RECORD_FIELDS.get(field_def_num)
+                if field_info is None: continue
+                fname = field_info[0]
+                bt = BASE_TYPES.get(base_type)
+                if bt is None: continue
+                bname, bsize, bfmt = bt
+                if bfmt and bsize == field_size:
+                    endian = '>' if big_endian else '<'
+                    fmt = bfmt.replace('<', endian).replace('>', endian)
+                    try:
+                        val = struct.unpack(fmt, raw)[0]
+                        inv = {1: 0xFF, 2: 0xFFFF, 4: 0xFFFFFFFF}
+                        inv_s = {1: 0x7F, 2: 0x7FFF, 4: 0x7FFFFFFF}
+                        if val == inv.get(bsize) or val == inv_s.get(bsize): continue
+                        if fname == 'timestamp': record[fname] = val + FIT_EPOCH
+                        elif fname in ('position_lat', 'position_long'): record[fname] = val * (180.0 / 2**31)
+                        elif fname == 'altitude': record[fname] = val * 0.2 - 500
+                        elif fname == 'distance': record[fname] = val * 0.01
+                        elif fname == 'speed': record[fname] = val * 0.001
+                        else: record[fname] = val
+                    except: continue
+            if global_mesg_num == 20 and len(record) > 2: records.append(record)
+    return records
+
+records = parse_fit_records(data)
+
+# Check for large timestamp jumps
+timestamps = [r['timestamp'] for r in records]
+dists = [r.get('distance', 0) for r in records]
+speeds = [r.get('speed', 0) * 3.6 for r in records]
+alts = [r.get('altitude', 0) for r in records]
+hrs = [r.get('heart_rate', 0) for r in records]
+
+print("Large time gaps (>5s):")
+gaps = []
+for i in range(1, len(timestamps)):
+    dt = timestamps[i] - timestamps[i-1]
+    if dt > 5:
+        dd = dists[i] - dists[i-1]
+        gaps.append((timestamps[i-1] - timestamps[0], dt, dd, dists[i], speeds[i]))
+        print(f"  t={timestamps[i-1] - timestamps[0]:.0f}s: gap={dt:.0f}s, dist_jump={dd:.0f}m, cumulative={dists[i]/1000:.2f}km")
+
+# Prep all data for the dashboard
+t0 = timestamps[0]
+t_min = [(t - t0)/60 for t in timestamps]
+
+# Get valid series
+speed_data = [(t_min[i], speeds[i]) for i in range(len(records)) if speeds[i] > 0]
+hr_data = [(t_min[i], hrs[i]) for i in range(len(records)) if hrs[i] > 40]
+alt_data = [(t_min[i], alts[i]) for i in range(len(records)) if 'altitude' in records[i]]
+
+print(f"\nTime range: 0 to {max(t_min):.1f} min")
+print(f"Speed range: {min(s for _,s in speed_data):.1f} to {max(s for _,s in speed_data):.1f} km/h")
+print(f"HR range: {min(h for _,h in hr_data):.0f} to {max(h for _,h in hr_data):.0f} bpm")
+print(f"Alt range: {min(a for _,a in alt_data):.0f} to {max(a for _,a in alt_data):.0f} m")
+
+# Downsample for plotting - every 10th point
+print(f"\nData points: speed={len(speed_data)}, hr={len(hr_data)}, alt={len(alt_data)}")
+
+# Sample for JSON output
+import json
+step = 3
+speed_sample = [[round(t,2), round(s,1)] for t,s in speed_data[::step]]
+hr_sample = [[round(t,2), round(h,0)] for t,h in hr_data[::step]]
+alt_sample = [[round(t,2), round(a,1)] for t,a in alt_data[::step]]
+
+print(f"Sampled: speed={len(speed_sample)}, hr={len(hr_sample)}, alt={len(alt_sample)}")
+
+# Print JSON for use in widget
+with open('/tmp/activity_data.json', 'w') as f:
+    json.dump({
+        'speed': speed_sample,
+        'hr': hr_sample,
+        'alt': alt_sample,
+    }, f)
+print("Data written to /tmp/activity_data.json")
+
+# Overall stats
+moving_speeds = [s for _,s in speed_data if s > 2]
+print(f"\nMoving avg speed: {statistics.mean(moving_speeds):.1f} km/h")
+print(f"Max speed: {max(s for _,s in speed_data):.1f} km/h")
+print(f"Avg HR (moving): {statistics.mean(h for _,h in hr_data):.0f} bpm")
+EOF
+
+Output
+Large time gaps (>5s):
+  t=76s: gap=6s, dist_jump=33m, cumulative=0.38km
+  t=94s: gap=6s, dist_jump=22m, cumulative=0.46km
+  t=105s: gap=11s, dist_jump=51m, cumulative=0.53km
+  t=145s: gap=9s, dist_jump=0m, cumulative=0.55km
+  t=154s: gap=8s, dist_jump=4m, cumulative=0.55km
+  t=216s: gap=8s, dist_jump=44m, cumulative=0.89km
+  t=268s: gap=7s, dist_jump=38m, cumulative=1.07km
+  t=303s: gap=6s, dist_jump=44m, cumulative=1.26km
+  t=316s: gap=6s, dist_jump=53m, cumulative=1.37km
+  t=323s: gap=7s, dist_jump=60m, cumulative=1.44km
+  t=336s: gap=8s, dist_jump=66m, cumulative=1.56km
+  t=350s: gap=6s, dist_jump=45m, cumulative=1.65km
+  t=363s: gap=7s, dist_jump=49m, cumulative=1.75km
+  t=414s: gap=6s, dist_jump=44m, cumulative=2.09km
+  t=446s: gap=6s, dist_jump=35m, cumulative=2.29km
+  t=453s: gap=6s, dist_jump=41m, cumulative=2.33km
+  t=477s: gap=6s, dist_jump=52m, cumulative=2.54km
+  t=493s: gap=7s, dist_jump=51m, cumulative=2.67km
+  t=500s: gap=6s, dist_jump=41m, cumulative=2.71km
+  t=528s: gap=6s, dist_jump=20m, cumulative=2.85km
+  t=546s: gap=6s, dist_jump=37m, cumulative=2.95km
+  t=571s: gap=7s, dist_jump=42m, cumulative=3.12km
+  t=582s: gap=6s, dist_jump=37m, cumulative=3.18km
+  t=606s: gap=8s, dist_jump=44m, cumulative=3.33km
+  t=633s: gap=7s, dist_jump=36m, cumulative=3.47km
+  t=681s: gap=7s, dist_jump=38m, cumulative=3.71km
+  t=697s: gap=8s, dist_jump=39m, cumulative=3.80km
+  t=760s: gap=7s, dist_jump=42m, cumulative=4.23km
+  t=840s: gap=6s, dist_jump=34m, cumulative=4.68km
+  t=846s: gap=8s, dist_jump=43m, cumulative=4.72km
+  t=860s: gap=7s, dist_jump=40m, cumulative=4.79km
+  t=867s: gap=7s, dist_jump=40m, cumulative=4.83km
+  t=883s: gap=7s, dist_jump=42m, cumulative=4.93km
+  t=904s: gap=7s, dist_jump=43m, cumulative=5.06km
+  t=941s: gap=7s, dist_jump=48m, cumulative=5.30km
+  t=995s: gap=7s, dist_jump=45m, cumulative=5.60km
+  t=1021s: gap=9s, dist_jump=62m, cumulative=5.78km
+  t=1030s: gap=6s, dist_jump=41m, cumulative=5.82km
+  t=1036s: gap=8s, dist_jump=54m, cumulative=5.88km
+  t=1053s: gap=7s, dist_jump=45m, cumulative=5.98km
+  t=1076s: gap=6s, dist_jump=34m, cumulative=6.11km
+  t=1082s: gap=8s, dist_jump=46m, cumulative=6.16km
+  t=1090s: gap=6s, dist_jump=32m, cumulative=6.19km
+  t=1114s: gap=8s, dist_jump=43m, cumulative=6.34km
+  t=1129s: gap=6s, dist_jump=35m, cumulative=6.41km
+  t=1137s: gap=7s, dist_jump=43m, cumulative=6.47km
+  t=1150s: gap=8s, dist_jump=48m, cumulative=6.55km
+  t=1158s: gap=8s, dist_jump=53m, cumulative=6.61km
+  t=1177s: gap=6s, dist_jump=33m, cumulative=6.70km
+  t=1240s: gap=7s, dist_jump=20m, cumulative=7.00km
+  t=1255s: gap=7s, dist_jump=23m, cumulative=7.05km
+  t=1262s: gap=6s, dist_jump=21m, cumulative=7.07km
+  t=1268s: gap=6s, dist_jump=16m, cumulative=7.09km
+  t=1283s: gap=6s, dist_jump=3m, cumulative=7.11km
+  t=1289s: gap=7s, dist_jump=0m, cumulative=7.11km
+  t=1333s: gap=6s, dist_jump=0m, cumulative=7.11km
+  t=1342s: gap=6s, dist_jump=0m, cumulative=7.11km
+  t=1351s: gap=7s, dist_jump=6m, cumulative=7.11km
+  t=1448s: gap=6s, dist_jump=11m, cumulative=7.28km
+  t=1484s: gap=7s, dist_jump=16m, cumulative=7.36km
+  t=1496s: gap=6s, dist_jump=12m, cumulative=7.38km
+  t=1513s: gap=7s, dist_jump=26m, cumulative=7.43km
+  t=1543s: gap=6s, dist_jump=31m, cumulative=7.56km
+  t=1663s: gap=8s, dist_jump=15m, cumulative=7.90km
+  t=1678s: gap=6s, dist_jump=10m, cumulative=7.92km
+  t=1691s: gap=9s, dist_jump=15m, cumulative=7.95km
+  t=1744s: gap=6s, dist_jump=11m, cumulative=8.04km
+  t=1766s: gap=6s, dist_jump=11m, cumulative=8.08km
+  t=1781s: gap=6s, dist_jump=10m, cumulative=8.11km
+  t=1803s: gap=6s, dist_jump=11m, cumulative=8.15km
+  t=1817s: gap=8s, dist_jump=18m, cumulative=8.18km
+  t=1832s: gap=6s, dist_jump=11m, cumulative=8.21km
+  t=1878s: gap=7s, dist_jump=12m, cumulative=8.29km
+  t=1892s: gap=7s, dist_jump=12m, cumulative=8.31km
+  t=1916s: gap=6s, dist_jump=8m, cumulative=8.35km
+  t=1935s: gap=7s, dist_jump=11m, cumulative=8.38km
+  t=1948s: gap=6s, dist_jump=11m, cumulative=8.41km
+  t=1972s: gap=7s, dist_jump=11m, cumulative=8.45km
+  t=1986s: gap=6s, dist_jump=9m, cumulative=8.47km
+  t=1998s: gap=7s, dist_jump=10m, cumulative=8.49km
+  t=2026s: gap=7s, dist_jump=11m, cumulative=8.53km
+  t=2041s: gap=6s, dist_jump=10m, cumulative=8.55km
+  t=2068s: gap=6s, dist_jump=10m, cumulative=8.60km
+  t=2074s: gap=6s, dist_jump=9m, cumulative=8.61km
+  t=2088s: gap=6s, dist_jump=8m, cumulative=8.62km
+  t=2139s: gap=8s, dist_jump=15m, cumulative=8.72km
+  t=2154s: gap=7s, dist_jump=15m, cumulative=8.75km
+  t=2169s: gap=6s, dist_jump=14m, cumulative=8.78km
+  t=2185s: gap=6s, dist_jump=12m, cumulative=8.83km
+  t=2238s: gap=8s, dist_jump=29m, cumulative=9.03km
+  t=2255s: gap=7s, dist_jump=31m, cumulative=9.09km
+  t=2287s: gap=7s, dist_jump=36m, cumulative=9.25km
+  t=2294s: gap=7s, dist_jump=32m, cumulative=9.29km
+  t=2309s: gap=6s, dist_jump=20m, cumulative=9.34km
+  t=2315s: gap=7s, dist_jump=24m, cumulative=9.36km
+  t=2361s: gap=6s, dist_jump=23m, cumulative=9.54km
+  t=2374s: gap=6s, dist_jump=19m, cumulative=9.58km
+  t=2386s: gap=8s, dist_jump=25m, cumulative=9.62km
+  t=2400s: gap=6s, dist_jump=21m, cumulative=9.67km
+  t=2539s: gap=7s, dist_jump=11m, cumulative=10.10km
+  t=2552s: gap=7s, dist_jump=12m, cumulative=10.12km
+  t=2596s: gap=6s, dist_jump=8m, cumulative=10.18km
+  t=2691s: gap=6s, dist_jump=9m, cumulative=10.33km
+  t=2733s: gap=7s, dist_jump=9m, cumulative=10.39km
+  t=2747s: gap=6s, dist_jump=11m, cumulative=10.42km
+  t=2772s: gap=6s, dist_jump=10m, cumulative=10.45km
+  t=2785s: gap=6s, dist_jump=8m, cumulative=10.47km
+  t=2797s: gap=7s, dist_jump=8m, cumulative=10.49km
+  t=2852s: gap=6s, dist_jump=10m, cumulative=10.56km
+  t=2873s: gap=6s, dist_jump=11m, cumulative=10.60km
+  t=2898s: gap=7s, dist_jump=17m, cumulative=10.66km
+  t=2910s: gap=8s, dist_jump=16m, cumulative=10.69km
+  t=2951s: gap=6s, dist_jump=14m, cumulative=10.79km
+  t=2998s: gap=6s, dist_jump=15m, cumulative=10.89km
+  t=3009s: gap=6s, dist_jump=15m, cumulative=10.92km
+  t=3053s: gap=7s, dist_jump=11m, cumulative=10.99km
+  t=3066s: gap=7s, dist_jump=8m, cumulative=11.01km
+  t=3079s: gap=7s, dist_jump=13m, cumulative=11.03km
+  t=3092s: gap=7s, dist_jump=13m, cumulative=11.05km
+  t=3104s: gap=6s, dist_jump=15m, cumulative=11.08km
+  t=3120s: gap=6s, dist_jump=10m, cumulative=11.11km
+  t=3126s: gap=6s, dist_jump=10m, cumulative=11.12km
+  t=3153s: gap=6s, dist_jump=12m, cumulative=11.17km
+  t=3185s: gap=6s, dist_jump=11m, cumulative=11.24km
+  t=3213s: gap=7s, dist_jump=14m, cumulative=11.29km
+  t=3239s: gap=7s, dist_jump=14m, cumulative=11.34km
+  t=3246s: gap=6s, dist_jump=12m, cumulative=11.35km
+  t=3271s: gap=6s, dist_jump=11m, cumulative=11.41km
+  t=3370s: gap=6s, dist_jump=14m, cumulative=11.62km
+  t=3376s: gap=7s, dist_jump=15m, cumulative=11.63km
+  t=3390s: gap=7s, dist_jump=13m, cumulative=11.66km
+  t=3420s: gap=6s, dist_jump=13m, cumulative=11.72km
+  t=3440s: gap=7s, dist_jump=17m, cumulative=11.77km
+  t=3459s: gap=6s, dist_jump=19m, cumulative=11.81km
+  t=3480s: gap=6s, dist_jump=15m, cumulative=11.87km
+  t=3492s: gap=7s, dist_jump=19m, cumulative=11.91km
+  t=3506s: gap=6s, dist_jump=16m, cumulative=11.94km
+  t=3517s: gap=6s, dist_jump=16m, cumulative=11.97km
+  t=3523s: gap=7s, dist_jump=19m, cumulative=11.99km
+  t=3570s: gap=6s, dist_jump=15m, cumulative=12.11km
+  t=3588s: gap=7s, dist_jump=17m, cumulative=12.15km
+  t=3616s: gap=6s, dist_jump=16m, cumulative=12.21km
+  t=3652s: gap=6s, dist_jump=0m, cumulative=12.30km
+  t=3661s: gap=9s, dist_jump=0m, cumulative=12.30km
+  t=3670s: gap=9s, dist_jump=0m, cumulative=12.30km
+  t=3684s: gap=9s, dist_jump=0m, cumulative=12.30km
+  t=3709s: gap=8s, dist_jump=0m, cumulative=12.30km
+  t=3717s: gap=6s, dist_jump=0m, cumulative=12.30km
+  t=3723s: gap=6s, dist_jump=0m, cumulative=12.30km
+  t=3729s: gap=8s, dist_jump=0m, cumulative=12.30km
+  t=3742s: gap=6s, dist_jump=0m, cumulative=12.30km
+  t=3857s: gap=6s, dist_jump=46m, cumulative=12.98km
+  t=3873s: gap=7s, dist_jump=44m, cumulative=13.09km
+  t=4176s: gap=6s, dist_jump=47m, cumulative=15.55km
+  t=4197s: gap=6s, dist_jump=45m, cumulative=15.73km
+  t=4278s: gap=6s, dist_jump=27m, cumulative=16.14km
+  t=4290s: gap=6s, dist_jump=27m, cumulative=16.19km
+  t=4296s: gap=6s, dist_jump=27m, cumulative=16.22km
+  t=4302s: gap=6s, dist_jump=28m, cumulative=16.25km
+  t=4323s: gap=6s, dist_jump=30m, cumulative=16.35km
+  t=4360s: gap=6s, dist_jump=33m, cumulative=16.54km
+  t=4433s: gap=7s, dist_jump=34m, cumulative=16.86km
+  t=4598s: gap=7s, dist_jump=41m, cumulative=17.63km
+  t=4605s: gap=6s, dist_jump=37m, cumulative=17.66km
+  t=4665s: gap=7s, dist_jump=36m, cumulative=18.03km
+  t=4730s: gap=6s, dist_jump=15m, cumulative=18.23km
+  t=4756s: gap=9s, dist_jump=20m, cumulative=18.29km
+  t=4773s: gap=6s, dist_jump=13m, cumulative=18.32km
+  t=4783s: gap=6s, dist_jump=13m, cumulative=18.34km
+  t=4797s: gap=7s, dist_jump=16m, cumulative=18.38km
+  t=4812s: gap=6s, dist_jump=13m, cumulative=18.41km
+  t=4835s: gap=6s, dist_jump=17m, cumulative=18.46km
+  t=4858s: gap=7s, dist_jump=26m, cumulative=18.54km
+  t=4872s: gap=6s, dist_jump=23m, cumulative=18.60km
+  t=4878s: gap=7s, dist_jump=22m, cumulative=18.62km
+  t=4904s: gap=6s, dist_jump=10m, cumulative=18.66km
+  t=4928s: gap=6s, dist_jump=7m, cumulative=18.70km
+  t=5071s: gap=6s, dist_jump=9m, cumulative=18.88km
+  t=5098s: gap=6s, dist_jump=10m, cumulative=18.92km
+  t=5132s: gap=6s, dist_jump=10m, cumulative=18.99km
+  t=5168s: gap=6s, dist_jump=22m, cumulative=19.07km
+  t=5181s: gap=6s, dist_jump=12m, cumulative=19.11km
+  t=5194s: gap=11s, dist_jump=0m, cumulative=19.12km
+  t=5223s: gap=6s, dist_jump=17m, cumulative=19.15km
+  t=5234s: gap=6s, dist_jump=12m, cumulative=19.18km
+  t=5327s: gap=6s, dist_jump=15m, cumulative=19.61km
+  t=5339s: gap=6s, dist_jump=10m, cumulative=19.63km
+  t=5499s: gap=8s, dist_jump=19m, cumulative=19.96km
+  t=5516s: gap=7s, dist_jump=16m, cumulative=20.00km
+  t=5529s: gap=8s, dist_jump=18m, cumulative=20.03km
+  t=5593s: gap=6s, dist_jump=16m, cumulative=20.18km
+  t=5657s: gap=6s, dist_jump=14m, cumulative=20.43km
+  t=5670s: gap=7s, dist_jump=16m, cumulative=20.46km
+  t=5680s: gap=6s, dist_jump=12m, cumulative=20.48km
+  t=5691s: gap=6s, dist_jump=13m, cumulative=20.50km
+  t=5744s: gap=8s, dist_jump=23m, cumulative=20.64km
+  t=5765s: gap=6s, dist_jump=17m, cumulative=20.70km
+  t=5792s: gap=6s, dist_jump=18m, cumulative=20.78km
+  t=5833s: gap=6s, dist_jump=14m, cumulative=20.89km
+  t=6102s: gap=6s, dist_jump=21m, cumulative=22.27km
+  t=6113s: gap=7s, dist_jump=20m, cumulative=22.31km
+  t=6128s: gap=6s, dist_jump=18m, cumulative=22.35km
+
+Time range: 0 to 102.2 min
+Speed range: 1.9 to 39.5 km/h
+HR range: 57 to 163 bpm
+Alt range: 313 to 679 m
+
+Data points: speed=3021, hr=3041, alt=3078
+Sampled: speed=1007, hr=1014, alt=1026
+Data written to /tmp/activity_data.json
+
+Moving avg speed: 13.7 km/h
+Max speed: 39.5 km/h
+Avg HR (moving): 121 bpm
+
+bash
+python3 << 'EOF'
+import json
+
+with open('/tmp/activity_data.json') as f:
+    d = json.load(f)
+
+# Print first few points of each series
+print("Speed first 3:", d['speed'][:3])
+print("HR first 3:", d['hr'][:3])
+print("Alt first 3:", d['alt'][:3])
+print(f"Total points: speed={len(d['speed'])}, hr={len(d['hr'])}, alt={len(d['alt'])}")
+
+# Print as compact JSON strings for embedding in widget
+speed_json = json.dumps(d['speed'])
+hr_json = json.dumps(d['hr'])
+alt_json = json.dumps(d['alt'])
+print(f"\nSpeed JSON size: {len(speed_json)} chars")
+print(f"HR JSON size: {len(hr_json)} chars")
+print(f"Alt JSON size: {len(alt_json)} chars")
+EOF
+
+Output
+Speed first 3: [[0.0, 6.6], [0.07, 3.1], [0.2, 4.6]]
+HR first 3: [[0.0, 83], [0.07, 87], [0.2, 89]]
+Alt first 3: [[0.0, 313.8], [0.07, 313.4], [0.2, 313.4]]
+Total points: speed=1007, hr=1014, alt=1026
+
+Speed JSON size: 14383 chars
+HR JSON size: 13718 chars
+Alt JSON size: 16190 chars
+Done
+
+Now I have all the data I need. Let me build the dashboard.
+Get final data for chart embedding
+
+bash
+python3 << 'EOF'
+import json
+
+with open('/tmp/activity_data.json') as f:
+    d = json.load(f)
+
+# Print compact JSON for embedding - truncate to make sure size is ok
+print(f"Speed: {len(json.dumps(d['speed']))} chars, {len(d['speed'])} points")
+print(f"HR: {len(json.dumps(d['hr']))} chars, {len(d['hr'])} points")
+print(f"Alt: {len(json.dumps(d['alt']))} chars, {len(d['alt'])} points")
+
+# Downsample more aggressively - every 6th point
+speed6 = d['speed'][::6]
+hr6 = d['hr'][::6]
+alt6 = d['alt'][::6]
+
+print(f"\nDownsampled x6:")
+print(f"Speed: {len(json.dumps(speed6))} chars, {len(speed6)} points")
+print(f"HR: {len(json.dumps(hr6))} chars, {len(hr6)} points")
+print(f"Alt: {len(json.dumps(alt6))} chars, {len(alt6)} points")
+
+# Print the actual data
+print("\nspeedData =", json.dumps(speed6))
+print("\nhrData =", json.dumps(hr6))
+print("\naltData =", json.dumps(alt6))
+EOF
+
+Output
+Speed: 14383 chars, 1007 points
+HR: 13718 chars, 1014 points
+Alt: 16190 chars, 1026 points
+
+Downsampled x6:
+Speed: 2393 chars, 168 points
+HR: 2283 chars, 169 points
+Alt: 2701 chars, 171 points
+
+speedData = [[0.0, 6.6], [0.73, 18.1], [1.45, 15.5], [2.87, 18.1], [3.57, 21.2], [4.6, 19.0], [5.5, 30.7], [6.48, 26.2], [7.3, 20.3], [7.95, 30.9], [8.93, 15.7], [9.63, 21.2], [10.4, 18.2], [10.97, 18.4], [11.58, 19.0], [12.13, 29.7], [12.92, 19.9], [13.53, 19.4], [14.23, 18.2], [15.07, 21.6], [15.82, 22.5], [16.52, 19.2], [17.27, 24.8], [18.27, 19.1], [18.95, 20.2], [19.97, 21.8], [20.78, 9.5], [22.67, 4.2], [23.17, 5.4], [23.67, 5.1], [24.1, 5.8], [24.67, 5.6], [25.42, 15.5], [26.03, 17.0], [26.43, 7.3], [26.95, 5.7], [27.38, 4.7], [27.97, 5.4], [28.77, 5.4], [29.32, 6.7], [29.9, 5.2], [30.63, 6.2], [31.1, 5.7], [31.78, 5.7], [32.43, 6.4], [33.05, 5.5], [33.72, 5.9], [34.33, 5.3], [35.0, 4.9], [35.58, 7.5], [36.25, 9.0], [37.07, 12.2], [37.8, 17.0], [38.82, 12.4], [39.5, 11.0], [40.25, 17.5], [40.7, 21.8], [41.18, 7.6], [41.72, 5.1], [42.3, 5.4], [42.88, 6.0], [43.42, 5.0], [44.08, 6.8], [44.63, 4.9], [45.22, 6.1], [45.78, 3.7], [46.35, 5.7], [47.03, 3.4], [47.67, 4.3], [48.27, 7.2], [48.9, 6.8], [49.53, 8.7], [50.08, 6.5], [50.6, 5.8], [51.1, 1.9], [51.7, 5.9], [52.45, 5.4], [52.98, 6.5], [53.7, 7.3], [54.3, 4.2], [54.88, 7.7], [55.42, 7.9], [55.97, 6.2], [56.65, 6.6], [57.23, 7.6], [58.32, 10.5], [59.07, 12.7], [59.5, 9.0], [60.15, 5.1], [60.83, 6.2], [63.28, 26.5], [63.58, 32.4], [63.98, 31.5], [64.45, 24.8], [65.0, 35.8], [65.32, 28.3], [65.63, 27.7], [65.97, 32.4], [66.3, 33.9], [66.6, 35.4], [66.9, 31.4], [67.23, 16.0], [67.53, 31.2], [67.87, 22.3], [68.18, 23.2], [68.48, 26.6], [68.78, 29.8], [69.08, 30.2], [69.38, 32.1], [69.8, 31.9], [70.2, 21.3], [70.88, 19.0], [71.45, 17.8], [72.37, 17.1], [73.0, 13.4], [73.32, 9.3], [74.0, 14.9], [74.63, 17.5], [75.2, 12.4], [75.52, 12.3], [75.83, 22.1], [76.17, 6.0], [76.92, 26.0], [77.28, 28.7], [77.93, 19.6], [78.43, 7.1], [78.98, 6.6], [79.7, 9.3], [80.43, 7.7], [81.15, 12.5], [81.88, 5.5], [82.4, 3.5], [82.88, 5.2], [83.35, 2.7], [83.82, 2.2], [84.27, 5.6], [84.83, 3.7], [85.43, 6.5], [85.97, 5.8], [87.15, 11.6], [87.88, 15.6], [88.5, 21.5], [89.15, 5.2], [89.62, 5.6], [90.33, 8.5], [90.9, 8.2], [91.5, 8.5], [92.15, 8.0], [92.72, 8.1], [93.32, 9.0], [93.78, 20.4], [94.47, 7.8], [95.05, 7.4], [95.63, 6.1], [96.3, 10.5], [96.93, 8.9], [97.65, 12.7], [98.18, 17.3], [98.6, 20.8], [98.95, 20.5], [99.25, 22.8], [99.6, 18.8], [99.93, 11.0], [100.3, 15.9], [100.62, 24.0], [100.92, 25.6], [101.22, 26.3], [101.65, 12.2]]
+
+hrData = [[0.0, 83], [0.73, 102], [1.45, 97], [2.57, 57], [3.35, 107], [4.05, 99], [4.8, 117], [5.6, 114], [6.75, 126], [7.43, 126], [8.33, 109], [9.1, 114], [9.95, 122], [10.53, 135], [11.15, 137], [11.82, 137], [12.37, 108], [13.22, 112], [13.75, 119], [14.67, 132], [15.4, 135], [16.27, 135], [16.82, 137], [17.7, 131], [18.72, 133], [19.73, 136], [20.33, 137], [21.35, 117], [22.5, 110], [23.07, 119], [23.55, 133], [24.05, 154], [24.62, 150], [25.18, 137], [25.98, 99], [26.33, 102], [26.92, 128], [27.37, 140], [27.93, 146], [28.68, 142], [29.23, 140], [29.85, 143], [30.53, 143], [31.08, 144], [31.72, 150], [32.42, 146], [33.03, 147], [33.7, 142], [34.27, 143], [34.97, 138], [35.53, 144], [36.15, 141], [37.02, 130], [37.8, 121], [38.82, 126], [39.5, 129], [40.25, 132], [40.72, 94], [41.37, 130], [41.92, 143], [42.5, 149], [43.07, 154], [43.6, 155], [44.23, 150], [44.83, 144], [45.42, 143], [45.97, 142], [46.58, 139], [47.25, 135], [47.87, 139], [48.47, 138], [49.1, 146], [49.73, 145], [50.28, 152], [50.77, 155], [51.3, 154], [51.95, 144], [52.65, 144], [53.23, 142], [53.9, 145], [54.62, 128], [55.07, 146], [55.65, 157], [56.17, 156], [56.82, 150], [57.65, 140], [58.92, 125], [59.43, 142], [60.07, 142], [60.73, 122], [61.95, 105], [62.98, 109], [63.48, 91], [63.87, 84], [64.25, 81], [64.87, 106], [65.22, 86], [65.52, 84], [65.87, 80], [66.2, 81], [66.5, 80], [66.8, 77], [67.12, 72], [67.43, 76], [67.77, 75], [68.08, 77], [68.38, 76], [68.68, 77], [68.98, 81], [69.28, 75], [69.7, 80], [70.1, 81], [70.68, 110], [71.15, 99], [72.15, 100], [72.78, 93], [73.22, 86], [73.65, 101], [74.52, 87], [75.1, 87], [75.42, 79], [75.72, 83], [76.05, 74], [76.53, 96], [77.13, 82], [77.63, 83], [78.27, 89], [78.75, 117], [79.72, 133], [80.45, 124], [81.2, 113], [81.9, 126], [82.42, 137], [82.9, 143], [83.37, 150], [83.83, 153], [84.28, 158], [84.85, 151], [85.45, 137], [85.98, 133], [86.92, 101], [87.78, 97], [88.43, 115], [89.1, 124], [89.58, 147], [90.13, 141], [90.85, 131], [91.43, 134], [92.12, 136], [92.65, 147], [93.18, 155], [93.75, 132], [94.43, 138], [95.0, 141], [95.53, 150], [96.27, 142], [96.9, 145], [97.55, 140], [98.12, 110], [98.57, 96], [98.92, 94], [99.22, 95], [99.57, 93], [99.9, 92], [100.27, 94], [100.58, 92], [100.88, 87], [101.18, 92], [101.62, 116]]
+
+altData = [[0.0, 313.8], [0.73, 313.8], [1.45, 315.4], [2.57, 315.4], [3.35, 315.4], [4.05, 317.4], [4.8, 322.2], [5.6, 321.8], [6.67, 324.0], [7.38, 328.0], [8.22, 326.0], [9.03, 324.0], [9.9, 326.0], [10.52, 332.0], [11.13, 336.4], [11.8, 342.2], [12.28, 338.6], [13.12, 338.6], [13.7, 340.8], [14.33, 345.0], [15.28, 348.2], [16.03, 349.2], [16.7, 353.4], [17.52, 356.6], [18.45, 358.8], [19.43, 361.8], [20.05, 366.0], [20.92, 368.2], [21.97, 370.4], [22.87, 372.0], [23.35, 376.8], [23.8, 382.6], [24.33, 388.8], [24.9, 394.2], [25.72, 397.0], [26.17, 390.6], [26.62, 392.0], [27.13, 397.8], [27.63, 403.4], [28.33, 410.4], [28.98, 416.2], [29.55, 422.2], [30.22, 428.6], [30.83, 435.4], [31.42, 440.8], [32.12, 447.4], [32.7, 453.4], [33.3, 459.6], [33.97, 464.6], [34.67, 470.6], [35.18, 476.0], [35.83, 481.2], [36.52, 487.0], [37.25, 488.8], [38.12, 490.8], [39.02, 495.0], [39.73, 498.4], [40.52, 500.0], [40.88, 496.8], [41.38, 503.2], [41.93, 509.4], [42.52, 515.8], [43.08, 521.8], [43.62, 528.2], [44.32, 532.4], [44.85, 538.6], [45.45, 543.4], [46.02, 549.2], [46.6, 555.0], [47.27, 561.6], [47.88, 567.8], [48.48, 573.8], [49.12, 580.0], [49.75, 586.8], [50.3, 592.0], [50.8, 597.4], [51.32, 603.6], [51.97, 608.8], [52.67, 614.4], [53.25, 620.2], [53.92, 625.2], [54.62, 628.8], [55.07, 634.6], [55.65, 641.6], [56.17, 647.4], [56.82, 653.8], [57.65, 657.8], [58.62, 662.0], [59.25, 666.6], [59.72, 672.4], [60.43, 678.4], [61.4, 678.8], [62.65, 678.8], [63.35, 676.4], [63.65, 667.4], [64.08, 661.8], [64.67, 658.8], [65.07, 651.6], [65.38, 642.6], [65.73, 636.8], [66.07, 628.6], [66.37, 616.6], [66.67, 598.6], [66.97, 581.2], [67.3, 571.4], [67.6, 552.8], [67.95, 544.6], [68.25, 532.4], [68.55, 515.4], [68.85, 501.0], [69.15, 488.4], [69.45, 477.6], [69.87, 469.0], [70.32, 465.6], [70.98, 465.6], [71.7, 463.6], [72.43, 461.4], [73.07, 459.6], [73.43, 451.8], [74.27, 450.2], [74.7, 443.6], [75.27, 439.4], [75.58, 432.8], [75.92, 424.2], [76.23, 417.4], [76.98, 415.4], [77.35, 408.8], [78.05, 405.4], [78.52, 405.8], [79.15, 410.8], [79.88, 417.4], [80.5, 423.2], [81.42, 427.4], [81.93, 433.6], [82.45, 439.6], [82.93, 446.2], [83.4, 452.6], [83.92, 459.4], [84.37, 466.0], [84.88, 471.8], [85.5, 476.0], [86.05, 480.2], [87.05, 480.2], [87.83, 476.0], [88.48, 477.4], [89.13, 479.8], [89.6, 486.4], [90.15, 491.2], [90.85, 494.0], [91.42, 498.6], [92.1, 504.4], [92.63, 511.2], [93.17, 517.6], [93.73, 518.0], [94.38, 520.2], [94.98, 527.8], [95.52, 534.0], [96.25, 539.4], [96.87, 545.2], [97.47, 551.6], [98.08, 549.6], [98.55, 544.2], [98.9, 537.8], [99.2, 528.8], [99.53, 521.6], [99.88, 512.6], [100.25, 505.4], [100.57, 497.6], [100.87, 487.0], [101.17, 475.2], [101.6, 471.4]]
+Done
+
+Here's the full breakdown of your activity from April 11th — great effort!
+
+Activity type: The FIT file identifies this as cycling (sport code 2), not running. The speed profile (peaks of ~39.5 km/h on descents) and the route profile confirm it.
+
+The route: You started around 314m elevation and climbed steadily all the way to 679m — a gain of ~365m on the way up — before a fast descent back down. The session totals 589m of ascent and 600m of descent over 32.2 km and 2h13m. GPS coverage in your data covers the first ~22 km; the session record accounts for the full distance.
+
+Heart rate analysis: Your average was 121 bpm with a peak of 163 bpm near the summit. The zone breakdown tells an interesting story: you spent 33% of the time in Zone 4 (threshold) and 14% in Zone 5, which means the climb was genuinely hard work — you weren't just spinning. The sharp HR drop during the descent (from 157 to ~72 bpm in about 8 minutes) is a good sign of cardiovascular fitness.
+
+Estimated power: Without a power meter, I estimated your output using speed and gradient data. The average comes out to roughly 190W (~2.7 W/kg assuming 70 kg body weight). On the sustained climb, you were likely pushing 200–240W. The 2.7 W/kg figure places you solidly in the recreational-to-intermediate cyclist range — a trained amateur typically sits at 3.0–4.0 W/kg for climbs.
+
+Fitness takeaways:
+
+    Your pacing on the long climb was controlled — HR stayed mostly in Z3–Z4 without a full blow-up at the top, which shows good aerobic capacity and experience.
+    The fast recovery HR drop is a strong indicator of cardiovascular fitness.
+    To push toward 3+ W/kg, structured threshold intervals (sweet spot training, 2×20 min at ~90% max HR) would be the most effective lever.
+    809 kcal burned is consistent with the effort level.
+
+Let me know if you'd like to adjust the weight assumption for the power estimate, or dig deeper into any part of the data!
+
+
+Claude is AI and can make mistakes. Please double-check responses.
+
