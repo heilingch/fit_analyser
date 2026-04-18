@@ -2,7 +2,7 @@
 
 A powerful, high-performance Python application designed to analyze and visualize Garmin FIT files. Whether you're a cyclist or a runner, this tool provides deep insights into your activities with a focus on data integrity and visual clarity.
 
-![Fit File Analyzer Dashboard](dashboard.png)
+![Fit File Analyzer Dashboard](Tool_screenshot.png)
 
 ## 🚀 Key Features
 
