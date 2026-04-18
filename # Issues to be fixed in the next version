@@ -1,0 +1,21 @@
+# Issues to be fixed in the next version
+
+The following issues have been found during tool usage and should be fixed one by one.
+Use this file as a basis checklist and compile a prompt for each task to orchestrate the fixes. The code shall be changed incrementally.
+
+* [ ] The theme is ugly. Dark background and white diagrams are not nice. There should be configureable themes:
+  - dark
+  - light
+  - high contrast
+  - dark-blue
+  - dark-green
+  Themes should not be hardcoded in the code, but loaded from a separate style file to make the codebase more readable.
+* [ ] Loading the locations and metadata of a folder with many tracks takes very long - this information should be somhow cached;
+    If possible, the tool should be responsive while the data is retrieved
+* [ ] When differennt FIT files are selected and some have heart rate data and other don't, the average section is not correctly recomputed.
+There is an average heart rate displayed, even if this is not possible because the selected FIT file does not contain this data.
+* [ ] The tool should also support GPX files to make it more general-purpose.
+* [ ] The select folder button should have a folder logo - otherwise it is hard to recognize
+* [ ] The minor grid in the plot should be dashed instead of solid
+* [ ] The last opened folder should be restored when the tool is started - this would be more convenient
+* [ ] The statistics section should evaluate a fitness score based on the average heart rate and the average power - if both are available. The score should be computed for each activity separately. The score should be a number between 0 and 100, where 100 is the best possible score. 
