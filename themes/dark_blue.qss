@@ -1,0 +1,39 @@
+/* Dark Blue Theme */
+QWidget {
+    background-color: #1c2833;
+    color: #d4e6f1;
+}
+QTableWidget, QListWidget {
+    background-color: #154360;
+    alternate-background-color: #1a5276;
+    color: #d4e6f1;
+}
+QPushButton {
+    background-color: #2980b9;
+    color: #ffffff;
+    border: 1px solid #1f618d;
+    padding: 5px;
+    border-radius: 3px;
+}
+QPushButton:hover {
+    background-color: #3498db;
+}
+QHeaderView::section {
+    background-color: #154360;
+    color: #d4e6f1;
+    padding: 4px;
+    border: 1px solid #1c2833;
+}
+QTabWidget::pane {
+    border: 1px solid #2980b9;
+}
+QTabBar::tab {
+    background: #154360;
+    color: #d4e6f1;
+    border: 1px solid #1c2833;
+    padding: 5px 10px;
+}
+QTabBar::tab:selected {
+    background: #2980b9;
+    color: #ffffff;
+}

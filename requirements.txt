@@ -2,3 +2,4 @@ PySide6
 folium
 fitparse
 reverse_geocoder
+gpxpy

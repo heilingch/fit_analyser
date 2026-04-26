@@ -1,0 +1,40 @@
+/* High Contrast Theme */
+QWidget {
+    background-color: #000000;
+    color: #ffffff;
+}
+QTableWidget, QListWidget {
+    background-color: #000000;
+    alternate-background-color: #111111;
+    color: #ffffff;
+    gridline-color: #ffffff;
+}
+QPushButton {
+    background-color: #000000;
+    color: #ffffff;
+    border: 2px solid #ffffff;
+    padding: 5px;
+    border-radius: 0px;
+}
+QPushButton:hover {
+    background-color: #333333;
+}
+QHeaderView::section {
+    background-color: #000000;
+    color: #ffffff;
+    padding: 4px;
+    border: 1px solid #ffffff;
+}
+QTabWidget::pane {
+    border: 2px solid #ffffff;
+}
+QTabBar::tab {
+    background: #000000;
+    color: #ffffff;
+    border: 1px solid #ffffff;
+    padding: 5px 10px;
+}
+QTabBar::tab:selected {
+    background: #ffffff;
+    color: #000000;
+}

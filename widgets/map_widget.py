@@ -58,6 +58,30 @@ class MapWidget(QWidget):
             folium.Marker(valid_coords[0], popup='Start', icon=folium.Icon(color='green')).add_to(m)
             folium.Marker(valid_coords[-1], popup='End', icon=folium.Icon(color='red')).add_to(m)
             
+            js = """
+            <script>
+            var cursorMarker = null;
+            function updateCursor(lat, lon) {
+                for (var key in window) {
+                    if (key.startsWith('map_')) {
+                        var map = window[key];
+                        if (map instanceof L.Map) {
+                            if (!cursorMarker) {
+                                cursorMarker = L.circleMarker([lat, lon], {
+                                    radius: 8, fillColor: "#ff0000", color: "#000000", weight: 2, fillOpacity: 1
+                                }).addTo(map);
+                            } else {
+                                cursorMarker.setLatLng([lat, lon]);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            </script>
+            """
+            m.get_root().html.add_child(folium.Element(js))
+            
             # Save and load with base URL to fake Referer for OSM tiles
             m.save(self.temp_file)
             with open(self.temp_file, 'r', encoding='utf-8') as f:
@@ -66,3 +90,7 @@ class MapWidget(QWidget):
         except Exception as e:
             print(f"Map rendering error: {e}")
             self.web_view.setHtml(f"<h2>Map Error: {e}</h2>")
+
+    def update_cursor(self, lat, lon):
+        if lat is not None and lon is not None:
+            self.web_view.page().runJavaScript(f"updateCursor({lat}, {lon});")

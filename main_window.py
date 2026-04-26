@@ -1,12 +1,14 @@
 import os
 import json
 import traceback
+import pandas as pd
 from datetime import datetime
 
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QSplitter, QPushButton, QFileDialog,
                              QTabWidget, QComboBox, QLabel, QTableWidget,
-                             QTableWidgetItem, QHeaderView, QAbstractItemView)
+                             QTableWidgetItem, QHeaderView, QAbstractItemView,
+                             QProgressBar, QStyle, QStatusBar)
 from PySide6.QtCore import Qt, QThread, Signal
 
 from fitparse import FitFile
@@ -28,6 +30,110 @@ class SortableTableItem(QTableWidgetItem):
             except (ValueError, TypeError):
                 return str(my_data) < str(other_data)
         return super().__lt__(other)
+
+
+class MetadataWorker(QThread):
+    """Background thread to extract metadata without blocking UI."""
+    progress = Signal(int, int)
+    result_ready = Signal(dict)
+
+    def __init__(self, folder, files):
+        super().__init__()
+        self.folder = folder
+        self.files = files
+
+    def run(self):
+        results = {}
+        total = len(self.files)
+        cache_path = os.path.join(self.folder, ".fit_meta_cache.json")
+        cache = {}
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r') as f:
+                    cache = json.load(f)
+            except Exception:
+                pass
+
+        for i, fname in enumerate(self.files):
+            fpath = os.path.join(self.folder, fname)
+            try:
+                mtime = os.path.getmtime(fpath)
+            except OSError:
+                continue
+
+            cached_meta = cache.get(fname)
+            if cached_meta and cached_meta.get('_mtime') == mtime:
+                meta = cached_meta
+            else:
+                meta = self._extract(fpath)
+                meta['_mtime'] = mtime
+                cache[fname] = meta
+
+            results[fname] = meta
+            self.progress.emit(i + 1, total)
+
+        try:
+            with open(cache_path, 'w') as f:
+                json.dump(cache, f)
+        except Exception:
+            pass
+
+        self.result_ready.emit(results)
+
+    def _extract(self, fpath):
+        meta = {
+            'date_str': '', 'date_sort': '', 'sport': '',
+            'dist_str': '', 'dist_km': 0.0,
+            'dur_str': '', 'dur_sec': 0,
+            'lat': None, 'lon': None
+        }
+        try:
+            fitfile = FitFile(fpath)
+            for session in fitfile.get_messages('session'):
+                ts = session.get_value('start_time') or session.get_value('timestamp')
+                if ts and isinstance(ts, datetime):
+                    meta['date_str'] = ts.strftime('%Y-%m-%d %H:%M')
+                    meta['date_sort'] = ts.strftime('%Y%m%d%H%M%S')
+
+                sport = session.get_value('sport')
+                if sport:
+                    meta['sport'] = str(sport).capitalize()
+
+                dist = session.get_value('total_distance')
+                if dist is not None:
+                    dist_km = dist / 1000.0
+                    meta['dist_km'] = dist_km
+                    meta['dist_str'] = f"{dist_km:.1f} km"
+
+                dur = session.get_value('total_timer_time')
+                if dur is not None:
+                    meta['dur_sec'] = int(dur)
+                    h = int(dur // 3600)
+                    m = int((dur % 3600) // 60)
+                    if h > 0:
+                        meta['dur_str'] = f"{h}h {m:02d}m"
+                    else:
+                        meta['dur_str'] = f"{m}m"
+
+                start_lat = session.get_value('start_position_lat')
+                start_lon = session.get_value('start_position_long')
+                if start_lat is not None and start_lon is not None:
+                    meta['lat'] = semicircles_to_degrees(start_lat)
+                    meta['lon'] = semicircles_to_degrees(start_lon)
+                break
+
+            if meta['lat'] is None:
+                for record in fitfile.get_messages('record'):
+                    lat = record.get_value('position_lat')
+                    lon = record.get_value('position_long')
+                    if lat is not None and lon is not None:
+                        meta['lat'] = semicircles_to_degrees(lat)
+                        meta['lon'] = semicircles_to_degrees(lon)
+                        break
+        except Exception as e:
+            print(f"Metadata extraction failed for {fpath}: {e}")
+        return meta
+
 
 
 class GeocoderWorker(QThread):
@@ -54,12 +160,20 @@ class GeocoderWorker(QThread):
                 name = geo.get('name', '')
                 admin1 = geo.get('admin1', '')
                 cc = geo.get('cc', '')
+                
+                flag = ""
+                if cc and len(cc) == 2:
+                    try:
+                        flag = chr(ord(cc[0].upper()) + 127397) + chr(ord(cc[1].upper()) + 127397) + " "
+                    except Exception:
+                        pass
+                        
                 if admin1 and name:
-                    out[fname] = f"{name}, {admin1}"
+                    out[fname] = f"{flag}{name}, {admin1}"
                 elif name:
-                    out[fname] = f"{name}, {cc}"
+                    out[fname] = f"{flag}{name}, {cc}"
                 else:
-                    out[fname] = cc
+                    out[fname] = f"{flag}{cc}"
             self.result_ready.emit(out)
         except Exception as e:
             print(f"Geocoder error: {e}")
@@ -73,13 +187,18 @@ class MainWindow(QMainWindow):
         self.resize(1400, 900)
 
         self.data_model = FitAnalyzer()
-        self.current_folder = os.getcwd()
+        self.current_folder = self.data_model.config.get('settings', {}).get('last_folder', os.getcwd())
+        if not os.path.exists(self.current_folder):
+            self.current_folder = os.getcwd()
+            
         self._file_meta = {}       # {filename: {date, sport, dist, duration, lat, lon}}
         self._geo_cache_path = ""  # path to geocode cache file
         self._geo_cache = {}       # {filename: location_string}
         self._geo_worker = None
+        self._meta_worker = None
 
         self._init_ui()
+        self.apply_theme()
         self.load_folder()
 
     def _init_ui(self):
@@ -118,6 +237,7 @@ class MainWindow(QMainWindow):
         plot_layout.addLayout(plot_controls)
 
         self.plot_widget = FitPlotWidget()
+        self.plot_widget.cursorMoved.connect(self._on_cursor_moved)
         plot_layout.addWidget(self.plot_widget)
 
         self.v_splitter.addWidget(plot_container)
@@ -129,7 +249,8 @@ class MainWindow(QMainWindow):
 
         # Folder selection
         folder_layout = QHBoxLayout()
-        self.btn_select_folder = QPushButton("Select Folder")
+        self.btn_select_folder = QPushButton(" Select Folder")
+        self.btn_select_folder.setIcon(self.style().standardIcon(QStyle.SP_DirIcon))
         self.btn_select_folder.clicked.connect(self.select_folder)
         folder_layout.addWidget(self.btn_select_folder)
         right_layout.addLayout(folder_layout)
@@ -167,6 +288,39 @@ class MainWindow(QMainWindow):
         # Set splitter ratios
         self.splitter.setSizes([800, 600])
         self.v_splitter.setSizes([400, 400])
+        
+        # Connect dashboard track weight change
+        self.dashboard.bike_weight_changed.connect(self._on_track_weight_changed)
+        
+        # Status Bar
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.status_bar.addPermanentWidget(self.progress_bar)
+
+    def apply_theme(self):
+        theme_name = self.data_model.config.get('settings', {}).get('theme', 'light')
+        theme_path = os.path.join(os.path.dirname(__file__), 'themes', f"{theme_name}.qss")
+        if os.path.exists(theme_path):
+            with open(theme_path, 'r') as f:
+                self.setStyleSheet(f.read())
+        
+        import pyqtgraph as pg
+        if 'dark' in theme_name or 'high_contrast' in theme_name:
+            bg_col = '#1e1e1e' if theme_name == 'dark' else ('#154360' if theme_name == 'dark_blue' else ('#1e8449' if theme_name == 'dark_green' else 'k'))
+            fg_col = '#e0e0e0' if theme_name == 'dark' else ('#d4e6f1' if theme_name == 'dark_blue' else ('#d5f5e3' if theme_name == 'dark_green' else 'w'))
+            pg.setConfigOption('background', bg_col)
+            pg.setConfigOption('foreground', fg_col)
+            if hasattr(self, 'plot_widget'):
+                self.plot_widget.plot_widget.setBackground(bg_col)
+        else:
+            pg.setConfigOption('background', 'w')
+            pg.setConfigOption('foreground', 'k')
+            if hasattr(self, 'plot_widget'):
+                self.plot_widget.plot_widget.setBackground('w')
+            
+        self.update_plot()
 
     # ---- Folder & File Scanning ----
 
@@ -183,6 +337,9 @@ class MainWindow(QMainWindow):
 
         if not self.current_folder:
             return
+            
+        self.data_model.config.setdefault('settings', {})['last_folder'] = self.current_folder
+        self.data_model.save_config(self.data_model.config)
 
         # Load geocode cache
         self._geo_cache_path = os.path.join(self.current_folder, ".fit_geo_cache.json")
@@ -195,121 +352,70 @@ class MainWindow(QMainWindow):
                 pass
 
         fit_files = sorted([f for f in os.listdir(self.current_folder)
-                            if f.lower().endswith('.fit')])
+                            if f.lower().endswith('.fit') or f.lower().endswith('.gpx')])
+                            
+        if not fit_files:
+            self.status_bar.showMessage("No fit/gpx files found in directory.", 3000)
+            return
 
-        coords_to_geocode = {}  # files that need geocoding
+        self.status_bar.showMessage("Loading folder...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, len(fit_files))
+        
+        self._meta_worker = MetadataWorker(self.current_folder, fit_files)
+        self._meta_worker.progress.connect(self.progress_bar.setValue)
+        self._meta_worker.result_ready.connect(self._on_metadata_done)
+        self._meta_worker.start()
 
-        for fname in fit_files:
-            meta = self._extract_file_metadata(fname)
-            self._file_meta[fname] = meta
-
+    def _on_metadata_done(self, results):
+        self._file_meta = results
+        self.progress_bar.setVisible(False)
+        self.status_bar.showMessage(f"Loaded {len(results)} files.", 3000)
+        
+        coords_to_geocode = {}
+        for fname, meta in self._file_meta.items():
             row = self.file_table.rowCount()
             self.file_table.insertRow(row)
 
-            # Date — use SortableTableItem that sorts by the raw datetime string
             date_item = SortableTableItem(meta.get('date_str', ''))
             date_item.setData(Qt.UserRole, meta.get('date_sort', ''))
             self.file_table.setItem(row, 0, date_item)
 
-            # Sport
-            self.file_table.setItem(row, 1, QTableWidgetItem(meta.get('sport', '')))
+            sport_str = meta.get('sport', '')
+            sport_map = {'Cycling': '🚴', 'Running': '🏃', 'Swimming': '🏊', 'Walking': '🚶', 'Hiking': '🥾'}
+            sport_display = sport_map.get(sport_str, sport_str)
+            sport_item = QTableWidgetItem(sport_display)
+            # Make the sport emoji slightly larger
+            font = sport_item.font()
+            font.setPointSize(16)
+            sport_item.setFont(font)
+            sport_item.setTextAlignment(Qt.AlignCenter)
+            self.file_table.setItem(row, 1, sport_item)
 
-            # Distance — sortable numeric
             dist_item = SortableTableItem(meta.get('dist_str', ''))
             dist_item.setData(Qt.UserRole, meta.get('dist_km', 0.0))
             self.file_table.setItem(row, 2, dist_item)
 
-            # Duration — sortable numeric
             dur_item = SortableTableItem(meta.get('dur_str', ''))
             dur_item.setData(Qt.UserRole, meta.get('dur_sec', 0))
             self.file_table.setItem(row, 3, dur_item)
 
-            # Location — from cache or pending geocode
             loc = self._geo_cache.get(fname, '')
             self.file_table.setItem(row, 4, QTableWidgetItem(loc if loc else '...'))
 
             if not loc and meta.get('lat') is not None and meta.get('lon') is not None:
                 coords_to_geocode[fname] = (meta['lat'], meta['lon'])
 
-            # Filename (hidden sort key for loading)
             file_item = QTableWidgetItem(fname)
             self.file_table.setItem(row, 5, file_item)
 
         self.file_table.setSortingEnabled(True)
-        self.file_table.sortByColumn(0, Qt.DescendingOrder)  # newest first
+        self.file_table.sortByColumn(0, Qt.DescendingOrder)
 
-        # Kick off background geocoding for uncached files
         if coords_to_geocode:
             self._geo_worker = GeocoderWorker(coords_to_geocode)
             self._geo_worker.result_ready.connect(self._on_geocode_done)
             self._geo_worker.start()
-
-    def _extract_file_metadata(self, filename):
-        """Quickly parse session metadata from a .fit file without full analysis."""
-        meta = {
-            'date_str': '', 'date_sort': '', 'sport': '',
-            'dist_str': '', 'dist_km': 0.0,
-            'dur_str': '', 'dur_sec': 0,
-            'lat': None, 'lon': None
-        }
-        fpath = os.path.join(self.current_folder, filename)
-        try:
-            fitfile = FitFile(fpath)
-
-            # Get session data
-            for session in fitfile.get_messages('session'):
-                # Date
-                ts = session.get_value('start_time') or session.get_value('timestamp')
-                if ts and isinstance(ts, datetime):
-                    meta['date_str'] = ts.strftime('%Y-%m-%d %H:%M')
-                    meta['date_sort'] = ts.strftime('%Y%m%d%H%M%S')
-
-                # Sport
-                sport = session.get_value('sport')
-                if sport:
-                    meta['sport'] = str(sport).capitalize()
-
-                # Distance
-                dist = session.get_value('total_distance')
-                if dist is not None:
-                    dist_km = dist / 1000.0
-                    meta['dist_km'] = dist_km
-                    meta['dist_str'] = f"{dist_km:.1f} km"
-
-                # Duration
-                dur = session.get_value('total_timer_time')
-                if dur is not None:
-                    meta['dur_sec'] = int(dur)
-                    h = int(dur // 3600)
-                    m = int((dur % 3600) // 60)
-                    if h > 0:
-                        meta['dur_str'] = f"{h}h {m:02d}m"
-                    else:
-                        meta['dur_str'] = f"{m}m"
-
-                # Start coordinates (for geocoding)
-                start_lat = session.get_value('start_position_lat')
-                start_lon = session.get_value('start_position_long')
-                if start_lat is not None and start_lon is not None:
-                    meta['lat'] = semicircles_to_degrees(start_lat)
-                    meta['lon'] = semicircles_to_degrees(start_lon)
-
-                break  # only need first session
-
-            # If no start coords from session, grab first record
-            if meta['lat'] is None:
-                for record in fitfile.get_messages('record'):
-                    lat = record.get_value('position_lat')
-                    lon = record.get_value('position_long')
-                    if lat is not None and lon is not None:
-                        meta['lat'] = semicircles_to_degrees(lat)
-                        meta['lon'] = semicircles_to_degrees(lon)
-                        break
-
-        except Exception as e:
-            print(f"Metadata extraction failed for {filename}: {e}")
-
-        return meta
 
     def _on_geocode_done(self, results):
         """Called when background geocoding finishes. Update table and cache."""
@@ -346,20 +452,55 @@ class MainWindow(QMainWindow):
         file_path = os.path.join(self.current_folder, file_name)
 
         try:
-            if self.data_model.load_fit_file(file_path):
+            if file_name.lower().endswith('.fit'):
+                success = self.data_model.load_fit_file(file_path)
+            elif file_name.lower().endswith('.gpx'):
+                success = self.data_model.load_gpx_file(file_path)
+            else:
+                success = False
+                
+            if success:
+                # Apply track-specific bike weight if cached
+                cached_meta = self._file_meta.get(file_name, {})
+                if 'track_bike_weight' in cached_meta:
+                    self.data_model.summary['track_bike_weight'] = cached_meta['track_bike_weight']
+                    self.data_model._calculate_metrics() # recalc with track weight
+                
                 self.update_ui()
         except Exception as e:
             print(f"Error loading {file_name}: {e}")
             traceback.print_exc()
 
     def reanalyze_current_file(self):
+        self.apply_theme()
         selected = self.file_table.selectedItems()
         if selected:
             self.on_file_selected()
 
+    def _on_track_weight_changed(self, weight):
+        selected = self.file_table.selectedItems()
+        if not selected: return
+        fname = self.file_table.item(selected[0].row(), 5).text()
+        
+        # update cache and data model
+        if fname in self._file_meta:
+            self._file_meta[fname]['track_bike_weight'] = weight
+            
+            # update cache file
+            cache_path = os.path.join(self.current_folder, ".fit_meta_cache.json")
+            try:
+                with open(cache_path, 'w') as f:
+                    json.dump(self._file_meta, f)
+            except Exception: pass
+            
+        self.data_model.summary['track_bike_weight'] = weight
+        self.data_model._calculate_metrics()
+        self.update_ui()
+
     def update_ui(self):
         # Update Dashboard
-        self.dashboard.update_dashboard(self.data_model.summary, self.data_model.sport)
+        default_bw = self.data_model.config['equipment'].get('bike_weight_kg', 10)
+        self.dashboard.update_dashboard(self.data_model.summary, self.data_model.sport, default_bw)
 
         # Update Map
         track = self.data_model.get_map_track()
@@ -367,6 +508,16 @@ class MainWindow(QMainWindow):
 
         # Update Plot
         self.update_plot()
+
+    def _on_cursor_moved(self, idx):
+        if not self.data_model.data.empty and idx < len(self.data_model.data):
+            try:
+                lat = self.data_model.data['position_lat'].iloc[idx]
+                lon = self.data_model.data['position_long'].iloc[idx]
+                if pd.notna(lat) and pd.notna(lon):
+                    self.map_widget.update_cursor(lat, lon)
+            except Exception:
+                pass
 
     def update_plot(self):
         x_axis_type = 'elapsed_time'

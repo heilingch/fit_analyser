@@ -2,6 +2,8 @@ import json
 import math
 import os
 import pandas as pd
+import gpxpy
+import gpxpy.gpx
 from fitparse import FitFile
 
 def semicircles_to_degrees(semicircles):
@@ -33,6 +35,7 @@ class FitAnalyzer:
         self.config = config_data
 
     def load_fit_file(self, file_path):
+        self.summary = {}
         try:
             fitfile = FitFile(file_path)
         except Exception as e:
@@ -80,6 +83,80 @@ class FitAnalyzer:
             if session_dist and pd.notna(max_dist) and session_dist - max_dist > 2000:
                 self._synthesize_loop(max_dist, session_dist)
                 
+        self._calculate_metrics()
+        return True
+        
+    def load_gpx_file(self, file_path):
+        self.summary = {}
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                gpx = gpxpy.parse(f)
+        except Exception as e:
+            print(f"Error loading gpx file: {e}")
+            return False
+            
+        records_list = []
+        for track in gpx.tracks:
+            for segment in track.segments:
+                for point in segment.points:
+                    data = {
+                        'position_lat': point.latitude,
+                        'position_long': point.longitude,
+                        'altitude': point.elevation,
+                        'timestamp': point.time,
+                    }
+                    if point.extensions:
+                        # try to get hr
+                        for ext in point.extensions:
+                            # typical Garmin TrackPointExtension
+                            if 'TrackPointExtension' in ext.tag:
+                                for child in ext:
+                                    if 'hr' in child.tag:
+                                        data['heart_rate'] = float(child.text)
+                                    if 'atemp' in child.tag:
+                                        data['temperature'] = float(child.text)
+                    records_list.append(data)
+                    
+        self.data = pd.DataFrame(records_list)
+        if self.data.empty:
+            return False
+            
+        self.sport = 'unknown'
+        if gpx.tracks and gpx.tracks[0].type:
+            self.sport = gpx.tracks[0].type.lower()
+            
+        # Basic sorting and time difference
+        self.data['timestamp'] = pd.to_datetime(self.data['timestamp'])
+        self.data = self.data.sort_values(by='timestamp').reset_index(drop=True)
+        
+        # calculate distance cumulatively
+        distances = [0.0]
+        for i in range(1, len(self.data)):
+            lat1, lon1 = self.data.loc[i-1, 'position_lat'], self.data.loc[i-1, 'position_long']
+            lat2, lon2 = self.data.loc[i, 'position_lat'], self.data.loc[i, 'position_long']
+            import math
+            # Haversine
+            R = 6371000 # m
+            dlat = math.radians(lat2 - lat1)
+            dlon = math.radians(lon2 - lon1)
+            a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+            distances.append(distances[-1] + R * c)
+            
+        self.data['distance'] = distances
+        self.summary['total_distance'] = distances[-1]
+        
+        if len(self.data) > 1 and pd.notna(self.data.loc[0, 'timestamp']) and pd.notna(self.data.iloc[-1]['timestamp']):
+            self.summary['total_timer_time'] = (self.data.iloc[-1]['timestamp'] - self.data.loc[0, 'timestamp']).total_seconds()
+        
+        self.data['is_synthetic'] = False
+        
+        # approximate speed from distance and time
+        self.data['elapsed_time'] = (self.data['timestamp'] - self.data['timestamp'].iloc[0]).dt.total_seconds()
+        dt = self.data['elapsed_time'].diff().fillna(1.0)
+        dd = self.data['distance'].diff().fillna(0.0)
+        self.data['speed'] = dd / dt
+        
         self._calculate_metrics()
         return True
         
@@ -154,10 +231,14 @@ class FitAnalyzer:
         if 'is_synthetic' not in self.data.columns:
             self.data['is_synthetic'] = False
 
-        # Force numeric types on sensor columns (fitparse can leave object dtype
-        # when a column is all-None or has mixed types)
+        # Force numeric types on sensor columns
         for col in ['heart_rate', 'speed', 'altitude', 'distance', 'temperature']:
             self.data[col] = pd.to_numeric(self.data[col], errors='coerce')
+            
+        # Interpolate missing data (anomalies) for continuous sensors to prevent jumping to zero
+        for col in ['heart_rate', 'speed', 'altitude', 'temperature']:
+            if col in self.data.columns:
+                self.data[col] = self.data[col].interpolate(method='linear')
 
         # Sort and clean
         self.data = self.data.sort_values(by='timestamp').reset_index(drop=True)
@@ -196,7 +277,7 @@ class FitAnalyzer:
                 # P = 1.04 * mass * speed (m/s)
                 self.data['power'] = 1.04 * mass_rider * self.data['speed_ms']
             elif self.sport == 'cycling':
-                mass_bike = self.config['equipment'].get('bike_weight_kg', 10)
+                mass_bike = self.summary.get('track_bike_weight', self.config['equipment'].get('bike_weight_kg', 10))
                 total_mass = mass_rider + mass_bike
                 g = 9.81
                 crr = 0.005 # rolling resistance
@@ -241,8 +322,9 @@ class FitAnalyzer:
 
         # Calculate Power averages
         if 'power' in self.data.columns and self.data['power'].sum() > 0:
-            # Smooth power for plot
-            power_smoothed = self.data['power'].rolling(window=5, min_periods=1).mean()
+            # Smooth power for plot based on user config
+            window = self.config.get('settings', {}).get('power_filter_window', 5)
+            power_smoothed = self.data['power'].rolling(window=window, min_periods=1, center=True).mean()
             self.data['power'] = power_smoothed
             
             real_power = self.data.loc[real_mask, 'power']
@@ -286,12 +368,44 @@ class FitAnalyzer:
                 self.summary['total_distance_km'] = self.data['distance'].max() / 1000.0
             else:
                 self.summary['total_distance_km'] = 0.0
+                
+        # Calculate Fitness Score
+        if self.summary.get('avg_power') and self.summary.get('avg_heart_rate') and self.sport in ['cycling', 'running']:
+            user_config = self.config.get('user', {})
+            age = user_config.get('age', 30)
+            weight = user_config.get('weight_kg', 75)
+            max_hr = user_config.get('max_hr', 190)
+            resting_hr = user_config.get('resting_hr', 60)
+            
+            avg_hr = self.summary['avg_heart_rate']
+            avg_power = self.summary['avg_power']
+            
+            hr_reserve = max_hr - resting_hr
+            if hr_reserve > 0:
+                # 1. Heart Rate Reserve Fraction (HRRF)
+                raw_hrrf = (avg_hr - resting_hr) / hr_reserve
+                hrrf = max(0.3, min(0.95, raw_hrrf)) # Clamp to prevent extreme extrapolation
+                
+                # 2. Extrapolated Threshold Power (FTP)
+                est_ftp = (avg_power / hrrf) * 0.85
+                
+                # 3. Power-to-Weight Ratio (W/kg)
+                w_kg = est_ftp / weight if weight > 0 else 0
+                
+                # 4. Base Score Mapping
+                base_score = (w_kg - 1.0) * 20 + 30
+                
+                # 5. Age Grading
+                age_factor = max(0, age - 30) * 0.6
+                
+                final_score = base_score + age_factor
+                self.summary['fitness_score'] = max(0.0, min(100.0, final_score))
 
     def _safe_float_array(self, series):
         """Convert a pandas Series to a clean float64 numpy array, replacing
-        all None/NaN/non-numeric values with 0.0."""
+        non-numeric values with NaN so they are ignored by pyqtgraph."""
         import numpy as np
-        return pd.to_numeric(series, errors='coerce').fillna(0.0).astype(np.float64).values
+        return pd.to_numeric(series, errors='coerce').astype(np.float64).values
 
     def get_plot_data(self, x_axis='elapsed_time'):
         """Returns x, and dictionary of y series as clean float64 arrays."""

@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QFormLayout, QSpinBox, QPushButton, QVBoxLayout, QLabel
+from PySide6.QtWidgets import QWidget, QFormLayout, QSpinBox, QPushButton, QVBoxLayout, QLabel, QComboBox
 
 class ConfigWidget(QWidget):
     def __init__(self, data_model, parent=None):
@@ -25,11 +25,23 @@ class ConfigWidget(QWidget):
         self.resting_hr_spin.setRange(30, 120)
         self.resting_hr_spin.setValue(self.data_model.config['user'].get('resting_hr', 60))
         
-        # Equipment settings
         self.bike_weight_spin = QSpinBox()
         self.bike_weight_spin.setRange(5, 50)
         self.bike_weight_spin.setValue(self.data_model.config['equipment'].get('bike_weight_kg', 10))
         
+        # General Settings
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["light", "dark", "high_contrast", "dark_blue", "dark_green"])
+        current_theme = self.data_model.config.get('settings', {}).get('theme', 'light')
+        self.theme_combo.setCurrentText(current_theme)
+        
+        self.power_filter_spin = QSpinBox()
+        self.power_filter_spin.setRange(1, 60)
+        self.power_filter_spin.setSuffix(" s")
+        self.power_filter_spin.setValue(self.data_model.config.get('settings', {}).get('power_filter_window', 5))
+        
+        self.form_layout.addRow("Theme:", self.theme_combo)
+        self.form_layout.addRow("Power Filter Window:", self.power_filter_spin)
         self.form_layout.addRow("Age:", self.age_spin)
         self.form_layout.addRow("Weight (kg):", self.weight_spin)
         self.form_layout.addRow("Max HR:", self.max_hr_spin)
@@ -55,7 +67,11 @@ class ConfigWidget(QWidget):
             "equipment": {
                 "bike_weight_kg": self.bike_weight_spin.value()
             },
-            "settings": self.data_model.config.get('settings', {})
+            "settings": {
+                "theme": self.theme_combo.currentText(),
+                "power_filter_window": self.power_filter_spin.value(),
+                "last_folder": self.data_model.config.get('settings', {}).get('last_folder', '')
+            }
         }
         self.data_model.save_config(config_data)
         # Note: Recalculate will need to be triggered from main window 

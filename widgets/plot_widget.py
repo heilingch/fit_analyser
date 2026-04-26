@@ -1,8 +1,10 @@
 import pyqtgraph as pg
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 class FitPlotWidget(QWidget):
+    cursorMoved = Signal(int)
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layout = QVBoxLayout(self)
@@ -17,9 +19,13 @@ class FitPlotWidget(QWidget):
         self.layout.addWidget(self.checkbox_container)
         self.checkboxes = {}
         
-        self.plot_widget.showGrid(x=True, y=True)
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.addLegend()
         self.plot_widget.setLabel('bottom', "Time", units="min")
+        
+        # Enable minor ticks (and pyqtgraph draws grid for them if possible)
+        self.plot_widget.getAxis('bottom').setTickSpacing()
+        self.plot_widget.getAxis('left').setTickSpacing()
         
         # Crosshair setup
         self.vLine = pg.InfiniteLine(angle=90, movable=False)
@@ -72,7 +78,7 @@ class FitPlotWidget(QWidget):
         for key, y_array in y_data_dict.items():
             if y_array is not None and len(y_array) > 0:
                 pen = pg.mkPen(color=colors.get(key, 'k'), width=2)
-                curve = self.plot_widget.plot(x, y_array, pen=pen, name=names.get(key, key))
+                curve = self.plot_widget.plot(x, y_array, pen=pen, name=names.get(key, key), connect='finite')
                 self.curves[key] = curve
                 
         # Update checkboxes
@@ -125,6 +131,9 @@ class FitPlotWidget(QWidget):
                         
                 label_text = "&nbsp;&nbsp;|&nbsp;&nbsp;".join(parts)
                 self.label.setText(label_text)
+                
+                # Emit signal with data index
+                self.cursorMoved.emit(idx)
                 
             self.vLine.setPos(mousePoint.x())
             self.hLine.setPos(mousePoint.y())
