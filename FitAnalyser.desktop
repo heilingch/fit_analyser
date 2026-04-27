@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Fit Analyser
+Comment=Analyze your sports tracking fit files
+Exec=bash -c 'cd "$(dirname "%k")" && ./start_fit_analyser.sh'
+Icon=application-default-icon
+Terminal=false
+Type=Application
+Categories=Sports;Utility;

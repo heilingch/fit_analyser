@@ -29,7 +29,7 @@ A powerful, high-performance Python application designed to analyze and visualiz
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/yourusername/fit_analyser.git
+    git clone https://github.com/heilingch/fit_analyser.git
     cd fit_analyser
     ```
 
@@ -46,10 +46,29 @@ A powerful, high-performance Python application designed to analyze and visualiz
 
 ## 🖥️ Usage
 
-Simply run the main script to start the application:
+### Quick Start
+
+Use the provided launcher script, which automatically activates the virtual environment:
 
 ```bash
+./start_fit_analyser.sh
+```
+
+### Manual Start
+
+Alternatively, activate the virtual environment and run the main script directly:
+
+```bash
+source venv/bin/activate
 python main.py
+```
+
+### Desktop Integration (Linux)
+
+To add Fit Analyser to your application menu, copy the desktop entry file:
+
+```bash
+cp FitAnalyser.desktop ~/.local/share/applications/
 ```
 
 Upon startup, the application automatically scans the current working directory for `.fit` files. You can select a different folder using the "Select Folder" button.
@@ -65,3 +84,4 @@ Contributions are welcome! Feel free to open issues or submit pull requests to i
 ## 📜 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
