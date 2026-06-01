@@ -62,7 +62,7 @@ class MetadataWorker(QThread):
                 continue
 
             cached_meta = cache.get(fname)
-            if cached_meta and cached_meta.get('_mtime') == mtime:
+            if cached_meta and cached_meta.get('_mtime') == mtime and cached_meta.get('date_str'):
                 meta = cached_meta
             else:
                 meta = self._extract(fpath)
@@ -72,9 +72,11 @@ class MetadataWorker(QThread):
             results[fname] = meta
             self.progress.emit(i + 1, total)
 
+        # Prune deleted files from the cache
+        purged_cache = {fname: cache[fname] for fname in self.files if fname in cache}
         try:
             with open(cache_path, 'w') as f:
-                json.dump(cache, f)
+                json.dump(purged_cache, f)
         except Exception:
             pass
 
@@ -130,6 +132,80 @@ class MetadataWorker(QThread):
                         meta['lat'] = semicircles_to_degrees(lat)
                         meta['lon'] = semicircles_to_degrees(lon)
                         break
+
+            # Fallbacks if session message was missing/incomplete
+            if meta['date_str'] == '':
+                # Try file_id
+                for file_id in fitfile.get_messages('file_id'):
+                    ts = file_id.get_value('time_created')
+                    if ts and isinstance(ts, datetime):
+                        meta['date_str'] = ts.strftime('%Y-%m-%d %H:%M')
+                        meta['date_sort'] = ts.strftime('%Y%m%d%H%M%S')
+                        break
+                
+                # If still empty, try activity
+                if meta['date_str'] == '':
+                    for activity in fitfile.get_messages('activity'):
+                        ts = activity.get_value('timestamp')
+                        if ts and isinstance(ts, datetime):
+                            meta['date_str'] = ts.strftime('%Y-%m-%d %H:%M')
+                            meta['date_sort'] = ts.strftime('%Y%m%d%H%M%S')
+                            break
+
+                # If still empty, try first record
+                if meta['date_str'] == '':
+                    for record in fitfile.get_messages('record'):
+                        ts = record.get_value('timestamp')
+                        if ts and isinstance(ts, datetime):
+                            meta['date_str'] = ts.strftime('%Y-%m-%d %H:%M')
+                            meta['date_sort'] = ts.strftime('%Y%m%d%H%M%S')
+                            break
+
+                # Try sport from folder name
+                folder_lower = self.folder.lower()
+                if 'radfahren' in folder_lower or 'cycling' in folder_lower or 'bike' in folder_lower:
+                    meta['sport'] = 'Cycling'
+                elif 'running' in folder_lower or 'laufen' in folder_lower:
+                    meta['sport'] = 'Running'
+
+                # Try distance from records
+                max_dist = 0.0
+                has_dist = False
+                for record in fitfile.get_messages('record'):
+                    dist = record.get_value('distance')
+                    if dist is not None:
+                        has_dist = True
+                        if dist > max_dist:
+                            max_dist = dist
+                if has_dist:
+                    dist_km = max_dist / 1000.0
+                    meta['dist_km'] = dist_km
+                    meta['dist_str'] = f"{dist_km:.1f} km"
+
+                # Try duration from activity
+                dur = None
+                for activity in fitfile.get_messages('activity'):
+                    dur = activity.get_value('total_timer_time')
+                    if dur is not None:
+                        break
+                # If not in activity, calculate from record timestamps
+                if dur is None:
+                    timestamps = []
+                    for record in fitfile.get_messages('record'):
+                        ts = record.get_value('timestamp')
+                        if ts and isinstance(ts, datetime):
+                            timestamps.append(ts)
+                    if len(timestamps) > 1:
+                        dur = (max(timestamps) - min(timestamps)).total_seconds()
+                
+                if dur is not None:
+                    meta['dur_sec'] = int(dur)
+                    h = int(dur // 3600)
+                    m = int((dur % 3600) // 60)
+                    if h > 0:
+                        meta['dur_str'] = f"{h}h {m:02d}m"
+                    else:
+                        meta['dur_str'] = f"{m}m"
         except Exception as e:
             print(f"Metadata extraction failed for {fpath}: {e}")
         return meta
@@ -247,12 +323,18 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Folder selection
+        # Folder selection & Refresh
         folder_layout = QHBoxLayout()
         self.btn_select_folder = QPushButton(" Select Folder")
         self.btn_select_folder.setIcon(self.style().standardIcon(QStyle.SP_DirIcon))
         self.btn_select_folder.clicked.connect(self.select_folder)
         folder_layout.addWidget(self.btn_select_folder)
+
+        self.btn_refresh = QPushButton(" Refresh")
+        self.btn_refresh.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.btn_refresh.clicked.connect(self.load_folder)
+        folder_layout.addWidget(self.btn_refresh)
+
         right_layout.addLayout(folder_layout)
 
         # File Table (replaces QListWidget)
@@ -330,50 +412,30 @@ class MainWindow(QMainWindow):
             self.current_folder = folder
             self.load_folder()
 
-    def load_folder(self):
-        self.file_table.setSortingEnabled(False)  # disable during population
+    def select_file_by_name(self, filename):
+        if not filename:
+            return
+        for row in range(self.file_table.rowCount()):
+            item = self.file_table.item(row, 5)
+            if item and item.text() == filename:
+                self.file_table.selectRow(row)
+                break
+
+    def _populate_table(self, results):
+        # Save current selection to restore it afterwards
+        selected_fname = None
+        selected = self.file_table.selectedItems()
+        if selected:
+            row = selected[0].row()
+            fname_item = self.file_table.item(row, 5)
+            if fname_item:
+                selected_fname = fname_item.text()
+
+        self.file_table.setSortingEnabled(False)
         self.file_table.setRowCount(0)
-        self._file_meta.clear()
-
-        if not self.current_folder:
-            return
-            
-        self.data_model.config.setdefault('settings', {})['last_folder'] = self.current_folder
-        self.data_model.save_config(self.data_model.config)
-
-        # Load geocode cache
-        self._geo_cache_path = os.path.join(self.current_folder, ".fit_geo_cache.json")
-        self._geo_cache = {}
-        if os.path.exists(self._geo_cache_path):
-            try:
-                with open(self._geo_cache_path, 'r') as f:
-                    self._geo_cache = json.load(f)
-            except Exception:
-                pass
-
-        fit_files = sorted([f for f in os.listdir(self.current_folder)
-                            if f.lower().endswith('.fit') or f.lower().endswith('.gpx')])
-                            
-        if not fit_files:
-            self.status_bar.showMessage("No fit/gpx files found in directory.", 3000)
-            return
-
-        self.status_bar.showMessage("Loading folder...")
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, len(fit_files))
-        
-        self._meta_worker = MetadataWorker(self.current_folder, fit_files)
-        self._meta_worker.progress.connect(self.progress_bar.setValue)
-        self._meta_worker.result_ready.connect(self._on_metadata_done)
-        self._meta_worker.start()
-
-    def _on_metadata_done(self, results):
-        self._file_meta = results
-        self.progress_bar.setVisible(False)
-        self.status_bar.showMessage(f"Loaded {len(results)} files.", 3000)
         
         coords_to_geocode = {}
-        for fname, meta in self._file_meta.items():
+        for fname, meta in results.items():
             row = self.file_table.rowCount()
             self.file_table.insertRow(row)
 
@@ -385,7 +447,6 @@ class MainWindow(QMainWindow):
             sport_map = {'Cycling': '🚴', 'Running': '🏃', 'Swimming': '🏊', 'Walking': '🚶', 'Hiking': '🥾'}
             sport_display = sport_map.get(sport_str, sport_str)
             sport_item = QTableWidgetItem(sport_display)
-            # Make the sport emoji slightly larger
             font = sport_item.font()
             font.setPointSize(16)
             sport_item.setFont(font)
@@ -411,6 +472,94 @@ class MainWindow(QMainWindow):
 
         self.file_table.setSortingEnabled(True)
         self.file_table.sortByColumn(0, Qt.DescendingOrder)
+        
+        # Restore selection if it existed
+        if selected_fname:
+            self.select_file_by_name(selected_fname)
+            
+        return coords_to_geocode
+
+    def load_folder(self):
+        # Cancel any running threads to avoid race conditions
+        if self._meta_worker and self._meta_worker.isRunning():
+            self._meta_worker.terminate()
+            self._meta_worker.wait()
+        if self._geo_worker and self._geo_worker.isRunning():
+            self._geo_worker.terminate()
+            self._geo_worker.wait()
+
+        self.file_table.setSortingEnabled(False)
+        self.file_table.setRowCount(0)
+        self._file_meta.clear()
+
+        if not self.current_folder:
+            return
+            
+        self.data_model.config.setdefault('settings', {})['last_folder'] = self.current_folder
+        self.data_model.save_config(self.data_model.config)
+
+        # Load geocode cache
+        self._geo_cache_path = os.path.join(self.current_folder, ".fit_geo_cache.json")
+        self._geo_cache = {}
+        if os.path.exists(self._geo_cache_path):
+            try:
+                with open(self._geo_cache_path, 'r') as f:
+                    self._geo_cache = json.load(f)
+            except Exception:
+                pass
+
+        # Load metadata cache
+        cache_path = os.path.join(self.current_folder, ".fit_meta_cache.json")
+        cache = {}
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r') as f:
+                    cache = json.load(f)
+            except Exception:
+                pass
+
+        # Scan folder files on disk
+        fit_files = sorted([f for f in os.listdir(self.current_folder)
+                            if f.lower().endswith('.fit') or f.lower().endswith('.gpx')])
+                            
+        if not fit_files:
+            self.status_bar.showMessage("No fit/gpx files found in directory.", 3000)
+            return
+
+        # Populate table instantly with cached files that physically exist
+        instant_results = {}
+        for fname in fit_files:
+            fpath = os.path.join(self.current_folder, fname)
+            try:
+                mtime = os.path.getmtime(fpath)
+            except OSError:
+                continue
+            
+            cached_meta = cache.get(fname)
+            if cached_meta and cached_meta.get('_mtime') == mtime and cached_meta.get('date_str'):
+                instant_results[fname] = cached_meta
+
+        if instant_results:
+            self._file_meta = instant_results.copy()
+            self._populate_table(instant_results)
+            self.status_bar.showMessage(f"Loaded {len(instant_results)} cached files. Checking for updates...", 2000)
+        else:
+            self.status_bar.showMessage("Loading folder...")
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, len(fit_files))
+        
+        self._meta_worker = MetadataWorker(self.current_folder, fit_files)
+        self._meta_worker.progress.connect(self.progress_bar.setValue)
+        self._meta_worker.result_ready.connect(self._on_metadata_done)
+        self._meta_worker.start()
+
+    def _on_metadata_done(self, results):
+        self._file_meta = results
+        self.progress_bar.setVisible(False)
+        self.status_bar.showMessage(f"Loaded {len(results)} files.", 3000)
+        
+        coords_to_geocode = self._populate_table(results)
 
         if coords_to_geocode:
             self._geo_worker = GeocoderWorker(coords_to_geocode)

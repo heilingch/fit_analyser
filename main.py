@@ -1,7 +1,7 @@
 import sys
 import os
 from PySide6.QtWidgets import QApplication, QSplashScreen
-from PySide6.QtGui import QPixmap, QIcon
+from PySide6.QtGui import QPixmap, QIcon, QFont, QColor
 from PySide6.QtCore import Qt, QTimer
 from main_window import MainWindow
 
@@ -26,7 +26,18 @@ def main():
     if os.path.exists(logo_path):
         pixmap = QPixmap(logo_path).scaled(400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         splash = QSplashScreen(pixmap, Qt.WindowStaysOnTopHint)
+        
+        # Set splash screen font and show message
+        font = QFont("Arial", 12, QFont.Bold)
+        splash.setFont(font)
         splash.show()
+        
+        version = "1.2.0"
+        splash.showMessage(
+            f"Fit Analyser Tool loading...\nVersion {version}",
+            Qt.AlignBottom | Qt.AlignHCenter,
+            QColor(Qt.white)
+        )
         
         # Wait 1.5 seconds, then load and show the main window
         QTimer.singleShot(1500, lambda: show_main_window(splash, app))

@@ -71,8 +71,45 @@ class FitAnalyzer:
             self.summary['avg_speed'] = session.get_value('avg_speed')
             self.summary['max_speed'] = session.get_value('max_speed')
             break
-            
+
+        # Fallbacks if session message was missing
+        if not self.summary:
+            # Determine sport from folder name/path
+            folder_lower = file_path.lower()
+            if 'radfahren' in folder_lower or 'cycling' in folder_lower or 'bike' in folder_lower:
+                self.sport = 'cycling'
+            elif 'running' in folder_lower or 'laufen' in folder_lower:
+                self.sport = 'running'
+
+            # Distance from records
+            if not self.data.empty and 'distance' in self.data.columns:
+                self.summary['total_distance'] = self.data['distance'].max()
+
+            # Duration from activity or records
+            activity_msgs = list(fitfile.get_messages('activity'))
+            if activity_msgs and activity_msgs[0].get_value('total_timer_time') is not None:
+                self.summary['total_timer_time'] = activity_msgs[0].get_value('total_timer_time')
+            elif not self.data.empty and 'timestamp' in self.data.columns:
+                timestamps = self.data['timestamp'].dropna()
+                if len(timestamps) > 1:
+                    self.summary['total_timer_time'] = (timestamps.max() - timestamps.min()).total_seconds()
+
+            # Heart rates and speed from records
+            if not self.data.empty:
+                if 'heart_rate' in self.data.columns:
+                    hrs = self.data['heart_rate'].dropna()
+                    if not hrs.empty:
+                        self.summary['avg_heart_rate'] = hrs.mean()
+                        self.summary['max_heart_rate'] = hrs.max()
+                if 'speed' in self.data.columns:
+                    speeds = self.data['speed'].dropna()
+                    if not speeds.empty:
+                        self.summary['avg_speed'] = speeds.mean()
+                        self.summary['max_speed'] = speeds.max()
+
         self.data['is_synthetic'] = False
+        
+        self.clean_data()
         
         # Synthetic Loop Closer
         if not self.data.empty and self.summary.get('total_distance'):
@@ -218,9 +255,72 @@ class FitAnalyzer:
         synth_df = pd.DataFrame(synthetic_records)
         self.data = pd.concat([self.data, synth_df], ignore_index=True)
 
+    def clean_data(self):
+        if self.data.empty:
+            return
+
+        # 1. Clean GPS positions (replace suspicious/missing coordinates with last known good)
+        if 'position_lat' in self.data.columns and 'position_long' in self.data.columns:
+            last_good_lat = None
+            last_good_lon = None
+            
+            # Find the first valid position to initialize
+            for i in range(len(self.data)):
+                lat = self.data.loc[i, 'position_lat']
+                lon = self.data.loc[i, 'position_long']
+                if pd.notna(lat) and pd.notna(lon) and lat != 0.0 and lon != 0.0:
+                    if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+                        last_good_lat = lat
+                        last_good_lon = lon
+                        break
+            
+            if last_good_lat is not None:
+                cleaned_lats = []
+                cleaned_lons = []
+                for i in range(len(self.data)):
+                    lat = self.data.loc[i, 'position_lat']
+                    lon = self.data.loc[i, 'position_long']
+                    
+                    is_suspicious = False
+                    if pd.isna(lat) or pd.isna(lon) or lat == 0.0 or lon == 0.0:
+                        is_suspicious = True
+                    elif not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+                        is_suspicious = True
+                        
+                    if is_suspicious:
+                        cleaned_lats.append(last_good_lat)
+                        cleaned_lons.append(last_good_lon)
+                    else:
+                        last_good_lat = lat
+                        last_good_lon = lon
+                        cleaned_lats.append(lat)
+                        cleaned_lons.append(lon)
+                
+                self.data['position_lat'] = cleaned_lats
+                self.data['position_long'] = cleaned_lons
+
+        # 2. Clean Distance (enforce strictly monotonous distance values)
+        if 'distance' in self.data.columns:
+            cleaned_distances = []
+            last_valid_dist = 0.0
+            for d in self.data['distance']:
+                try:
+                    d_val = float(d) if pd.notna(d) else 0.0
+                except (ValueError, TypeError):
+                    d_val = 0.0
+                
+                if d_val < last_valid_dist:
+                    cleaned_distances.append(last_valid_dist)
+                else:
+                    last_valid_dist = d_val
+                    cleaned_distances.append(d_val)
+            self.data['distance'] = cleaned_distances
+
     def _calculate_metrics(self):
         if self.data.empty:
             return
+
+        self.clean_data()
 
         # Ensure necessary columns exist
         for col in ['heart_rate', 'speed', 'altitude', 'distance', 'timestamp', 'temperature']:
