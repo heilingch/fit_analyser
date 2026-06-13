@@ -32,7 +32,7 @@ def main():
         splash.setFont(font)
         splash.show()
         
-        version = "1.2.0"
+        version = "1.3.0"
         splash.showMessage(
             f"Fit Analyser Tool loading...\nVersion {version}",
             Qt.AlignBottom | Qt.AlignHCenter,

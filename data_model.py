@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import numpy as np
 import pandas as pd
 import gpxpy
 import gpxpy.gpx
@@ -382,7 +383,6 @@ class FitAnalyzer:
                 g = 9.81
                 crr = 0.005 # rolling resistance
                 cd_a = 0.32 # drag area
-                rho = 1.225 # air density
                 
                 # We need dt, dh, dist
                 dt = self.data['elapsed_time'].diff().fillna(1.0)
@@ -411,11 +411,51 @@ class FitAnalyzer:
                     if grade > 0.25: grade = 0.25
                     elif grade < -0.25: grade = -0.25
                     
-                    p_grav = total_mass * g * math.sin(math.atan(grade)) * v
+                    # 1. Rolling resistance
                     p_roll = total_mass * g * math.cos(math.atan(grade)) * crr * v
+                    
+                    # 2. Aerodynamic drag with altitude and temperature corrected air density
+                    alt = self.data.loc[i, 'altitude']
+                    if pd.isna(alt) or alt is None:
+                        alt = 0.0
+                    
+                    # Barometric formula for pressure at altitude
+                    p_pressure = 101325.0 * (1.0 - 2.25577e-5 * alt) ** 5.25588
+                    
+                    # Temperature correction (Celsius)
+                    temp_val = self.data.loc[i, 'temperature'] if 'temperature' in self.data.columns else None
+                    if pd.isna(temp_val) or temp_val is None:
+                        # Standard ISA temperature lapse rate
+                        temp_c = 15.0 - 0.0065 * alt
+                    else:
+                        temp_c = float(temp_val)
+                    
+                    t_kelvin = temp_c + 273.15
+                    if t_kelvin > 0:
+                        rho = p_pressure / (287.05 * t_kelvin)
+                    else:
+                        rho = 1.225
+                    
+                    # Clamp air density to standard limits to avoid extreme sensor errors
+                    rho = max(0.8, min(1.3, rho))
                     p_drag = 0.5 * cd_a * rho * (v**3)
                     
-                    p_total = p_grav + p_roll + p_drag
+                    # 3. Gravitational power
+                    p_grav = total_mass * g * math.sin(math.atan(grade)) * v
+                    
+                    # 4. Acceleration power
+                    v_prev = self.data.loc[i-1, 'speed_ms']
+                    dt_val = dt.iloc[i]
+                    if dt_val > 0:
+                        a = (v - v_prev) / dt_val
+                    else:
+                        a = 0.0
+                    p_accel = total_mass * a * v
+                    
+                    # 5. Drivetrain loss (3% loss -> divide by 0.97 efficiency)
+                    p_mech = p_grav + p_roll + p_drag + p_accel
+                    p_total = p_mech / 0.97
+                    
                     powers.append(max(0.0, p_total))
                     
                 self.data['power'] = powers
@@ -500,6 +540,162 @@ class FitAnalyzer:
                 
                 final_score = base_score + age_factor
                 self.summary['fitness_score'] = max(0.0, min(100.0, final_score))
+
+        # Calculate recovery time
+        self._calculate_recovery_time()
+
+    def _calculate_recovery_time(self):
+        """Calculates the required recovery time in hours for optimum training effect.
+
+        Uses Banister's TRIMP (Training Impulse) as the base load metric, then
+        applies three physiological modifiers (elevation stress, zone distribution,
+        age) to derive a recovery window and supercompensation target.
+
+        Stores in self.summary:
+          - 'trimp':                  raw TRIMP score
+          - 'recovery_time_hours':    minimum recovery time (hours)
+          - 'supercompensation_hours': optimum next-session window (hours)
+        """
+        if self.data.empty:
+            self.summary['trimp'] = None
+            self.summary['recovery_time_hours'] = None
+            self.summary['supercompensation_hours'] = None
+            return
+
+        user_cfg = self.config.get('user', {})
+        max_hr = user_cfg.get('max_hr', 190)
+        resting_hr = user_cfg.get('resting_hr', 60)
+        weight = user_cfg.get('weight_kg', 75)
+        age = user_cfg.get('age', 30)
+
+        trimp = 0.0
+        # Check if we have heart rate data
+        has_hr = 'heart_rate' in self.data.columns and self.data['heart_rate'].notna().any()
+
+        if has_hr:
+            hr = pd.to_numeric(self.data['heart_rate'], errors='coerce')
+            # Calculate time difference in minutes
+            if 'elapsed_time' in self.data.columns:
+                dt_min = self.data['elapsed_time'].diff().fillna(1.0) / 60.0
+            else:
+                dt_min = pd.Series(1.0 / 60.0, index=self.data.index)
+
+            dt_min = dt_min.clip(0, 5.0)  # avoid huge jumps from pauses
+
+            hr_reserve = max_hr - resting_hr
+            if hr_reserve <= 0:
+                max_hr = 190
+                resting_hr = 60
+                hr_reserve = 130
+
+            hrr = (hr - resting_hr) / hr_reserve
+            hrr = hrr.clip(0.0, 1.0)
+            # Banister's TRIMP formula: TRIMP = sum( dt * hrr * 0.64 * e^(1.92 * hrr) )
+            trimp_points = dt_min * hrr * 0.64 * np.exp(1.92 * hrr)
+
+            # Exclude synthetic loop points to only measure actual exercise stress
+            if 'is_synthetic' in self.data.columns:
+                real_mask = ~self.data['is_synthetic'].fillna(False).astype(bool)
+                trimp_points = trimp_points.loc[real_mask]
+
+            trimp = trimp_points.sum()
+        else:
+            # Fallback estimation without heart rate
+            duration_min = self.summary.get('total_timer_time', 0) / 60.0
+            if duration_min <= 0 and 'elapsed_time' in self.data.columns and not self.data.empty:
+                duration_min = self.data['elapsed_time'].max() / 60.0
+
+            avg_speed_kmh = self.summary.get('avg_speed', 0) * 3.6
+            if avg_speed_kmh <= 0 and 'speed_kmh' in self.data.columns:
+                avg_speed_kmh = self.data['speed_kmh'].mean()
+            if pd.isna(avg_speed_kmh):
+                avg_speed_kmh = 0.0
+
+            # Estimate Intensity Factor (IF) based on power if available, else speed
+            if self.summary.get('normalized_power') or self.summary.get('avg_power'):
+                p_val = self.summary.get('normalized_power') or self.summary.get('avg_power')
+                ftp = 3.0 * weight  # Estimate FTP at 3 W/kg
+                if ftp <= 0:
+                    ftp = 225.0
+                if_factor = p_val / ftp
+            else:
+                sport = str(self.sport).lower()
+                if 'cycling' in sport or 'bike' in sport:
+                    if_factor = avg_speed_kmh / 25.0 if avg_speed_kmh > 0 else 0.5
+                elif 'run' in sport:
+                    if_factor = avg_speed_kmh / 12.0 if avg_speed_kmh > 0 else 0.6
+                else:
+                    if_factor = 0.6  # default moderate
+
+            if_factor = max(0.3, min(1.2, if_factor))
+
+            # Map Intensity Factor to estimated HRR fraction
+            hrr_est = 0.3 + 0.55 * if_factor
+            hrr_est = max(0.0, min(1.0, hrr_est))
+
+            # Estimated TRIMP
+            trimp = duration_min * hrr_est * 0.64 * math.exp(1.92 * hrr_est)
+
+        # Store raw TRIMP
+        self.summary['trimp'] = round(trimp, 1)
+
+        # --- TRIMP → baseline recovery range (sport-science table) ---
+        # Each band maps to (recovery_low_h, recovery_high_h)
+        if trimp < 50:
+            rec_low, rec_high = 6, 12
+        elif trimp < 100:
+            rec_low, rec_high = 12, 24
+        elif trimp < 150:
+            rec_low, rec_high = 24, 36
+        elif trimp < 200:
+            rec_low, rec_high = 36, 48
+        elif trimp < 280:
+            rec_low, rec_high = 48, 60
+        else:
+            rec_low, rec_high = 60, 96
+
+        # --- Modifier 1: Elevation stress (+10-15% effective load) ---
+        elev_gain = self.summary.get('elevation_gain', 0)
+        if elev_gain and pd.notna(elev_gain) and elev_gain > 0:
+            # Scale: 500m → +5%, 1000m → +10%, 1500m+ → +15% (capped)
+            elev_factor = 1.0 + min(0.15, elev_gain / 10000.0)
+        else:
+            elev_factor = 1.0
+
+        # --- Modifier 2: Zone distribution (threshold-heavy penalty) ---
+        zone_factor = 1.0
+        hr_zones = self.summary.get('hr_zones')
+        if hr_zones and isinstance(hr_zones, dict):
+            total_zone_time = sum(hr_zones.values())
+            if total_zone_time > 0:
+                # Time in Z3+ as fraction of total
+                z3_plus = sum(v for k, v in hr_zones.items()
+                              if k in ('Z3', 'Z4', 'Z5'))
+                threshold_ratio = z3_plus / total_zone_time
+                # > 50% in Z3+ → up to +10% recovery penalty
+                if threshold_ratio > 0.3:
+                    zone_factor = 1.0 + min(0.10, (threshold_ratio - 0.3) * 0.25)
+
+        # --- Modifier 3: Age (masters athlete: 40+ need 20-30% more) ---
+        if age >= 40:
+            # Linear ramp: 40→+15%, 50→+25%, 60→+35%
+            age_factor = 1.0 + 0.15 + (age - 40) * 0.01
+        else:
+            age_factor = 1.0
+
+        # Apply all modifiers
+        combined_factor = elev_factor * zone_factor * age_factor
+        recovery_low = rec_low * combined_factor
+        recovery_high = rec_high * combined_factor
+
+        # Cap at 96 hours (4 days)
+        recovery_low = min(96.0, recovery_low)
+        recovery_high = min(96.0, recovery_high)
+
+        # Recovery time = lower bound of the window (minimum rest needed)
+        self.summary['recovery_time_hours'] = round(recovery_low, 1)
+        # Supercompensation = upper bound (optimum time for next hard session)
+        self.summary['supercompensation_hours'] = round(recovery_high, 1)
 
     def _safe_float_array(self, series):
         """Convert a pandas Series to a clean float64 numpy array, replacing

@@ -30,9 +30,15 @@ class DashboardWidget(QWidget):
         self.avg_hr_label = QLabel("-")
         self.max_hr_label = QLabel("-")
         self.hr_zones_label = QLabel("-")
+        self.trimp_label = QLabel("-")
+        self.recovery_time_label = QLabel("-")
+        self.supercompensation_label = QLabel("-")
         self.hr_layout.addRow("Avg HR:", self.avg_hr_label)
         self.hr_layout.addRow("Max HR:", self.max_hr_label)
         self.hr_layout.addRow("Zones (s):", self.hr_zones_label)
+        self.hr_layout.addRow("TRIMP:", self.trimp_label)
+        self.hr_layout.addRow("Recovery Time:", self.recovery_time_label)
+        self.hr_layout.addRow("Supercompensation:", self.supercompensation_label)
         
         # Power Stats
         self.power_group = QGroupBox("Power (Estimated)")
@@ -56,7 +62,8 @@ class DashboardWidget(QWidget):
         # Clear stale data
         for label in [self.dist_label, self.time_label, self.elev_label, self.cal_label, 
                       self.fitness_score_label, self.avg_hr_label, self.max_hr_label, 
-                      self.hr_zones_label, self.avg_power_label, self.np_power_label]:
+                      self.hr_zones_label, self.trimp_label, self.recovery_time_label,
+                      self.supercompensation_label, self.avg_power_label, self.np_power_label]:
             label.setText("-")
             
         self.sport_label.setText(sport.capitalize())
@@ -93,6 +100,33 @@ class DashboardWidget(QWidget):
         if summary.get('hr_zones') is not None:
             zones_str = "\n".join([f"{k}: {v}" for k, v in summary['hr_zones'].items()])
             self.hr_zones_label.setText(zones_str)
+            
+        if summary.get('trimp') is not None:
+            self.trimp_label.setText(f"{summary['trimp']:.0f}")
+
+        if summary.get('recovery_time_hours') is not None:
+            hours_total = summary['recovery_time_hours']
+            days = int(hours_total // 24)
+            hours = int(round(hours_total % 24))
+            if hours == 24:
+                days += 1
+                hours = 0
+            if days > 0:
+                self.recovery_time_label.setText(f"{days}d {hours}h")
+            else:
+                self.recovery_time_label.setText(f"{hours}h")
+
+        if summary.get('supercompensation_hours') is not None:
+            sc_total = summary['supercompensation_hours']
+            sc_days = int(sc_total // 24)
+            sc_hours = int(round(sc_total % 24))
+            if sc_hours == 24:
+                sc_days += 1
+                sc_hours = 0
+            if sc_days > 0:
+                self.supercompensation_label.setText(f"{sc_days}d {sc_hours}h")
+            else:
+                self.supercompensation_label.setText(f"{sc_hours}h")
             
         if summary.get('avg_power') is not None:
             self.avg_power_label.setText(f"{summary['avg_power']:.1f} W")

@@ -59,6 +59,7 @@ for fname in fit_files:
         s = analyzer.summary
         for key in ['total_distance_km', 'total_timer_time', 'elevation_gain',
                      'avg_heart_rate', 'max_heart_rate', 'hr_zones',
+                     'trimp', 'recovery_time_hours', 'supercompensation_hours',
                      'avg_power', 'normalized_power', 'calories']:
             if key not in s:
                 errors.append(f"summary missing key: {key}")
